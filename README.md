@@ -5,7 +5,7 @@ also available for [MSYS](http://mingw.org/wiki/MSYS).
 
 Added features in this fork:
 
-  * Added support for glass / blur-behind in Windows 10.  Now supports glass in Vista, 7, 8 (with (Aero Glass)[http://www.glass8.eu/]), and 10.
+  * Added support for glass / blur-behind in Windows 10.  Now supports glass in Vista, 7, 8 (with [Aero Glass](http://www.glass8.eu/)), and 10.
   * When using glass, the alpha channel is now set properly.  That means text is finally legible, the default background is transparent, and the foreground is opaque.
 
 Known issues:
