@@ -21,12 +21,12 @@ Future intended features:
   * Correct the non-glass transparency modes, too.  Make text always 100% opaque, and only the background color transparent.  Currently, everything (including the titlebar) is made transparent.
   * Improve the transparency settings.  Currently, we have:
       
-      (*) Off   ( ) Low   ( ) Med.   ( ) High   ( ) Glass
+        (*) Off   ( ) Low   ( ) Med.   ( ) High   ( ) Glass
 
     It would be better to have something like:
 
-      Transparency: ( ) Off   ( ) Plain   (*) Glass
-      Opacity:      |================|----|  80%
+        Transparency: ( ) Off   ( ) Plain   (*) Glass
+        Opacity:      |================|----|  80%
 
   * Windows 10: Tablet mode conflicts with fullscreen mode.  In tablet mode, there should be no fullscreen/non-fullscreen switch.  Instead, the window will always have no titlebar, but a (autohide) titlebar replacement should be added.  The application should behave like a "Metro" app in this mode, and seamlessly switch back to regular behavior in desktop mode.  I have to investigate if there is a API, or some public source code for this kind of titlebar replacement.
 
