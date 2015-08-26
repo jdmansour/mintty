@@ -49,8 +49,74 @@ typedef struct {
 
 #endif
 
+const DWORD WCA_ACCENT_POLICY = 19;
+
+typedef enum {
+  ACCENT_DISABLED = 0,
+  ACCENT_ENABLE_GRADIENT = 1,
+  ACCENT_ENABLE_TRANSPARENTGRADIENT = 2,
+  ACCENT_ENABLE_BLURBEHIND = 3,
+  ACCENT_INVALID_STATE = 4,
+  _ACCENT_STATE_SIZE = 0xFFFFFFFF
+} ACCENT_STATE;
+
+typedef struct {
+  ACCENT_STATE accentState;
+  int accentFlags;
+  int gradientColor;
+  int invalidState;
+} DWMACCENTPOLICY;
+
+typedef struct _WINCOMPATTR_DATA {
+  DWMACCENTPOLICY AccentPolicy;
+} WINCOMPATTR_DATA;
+
+typedef struct tagWINCOMPATTR
+{
+    DWORD attribute; // the attribute to query
+    WINCOMPATTR_DATA *pData; // buffer to store the result
+    ULONG dataSize; // size of the pData buffer
+} WINCOMPATTR;
+
+typedef enum _DWMNCRENDERINGPOLICY { 
+  DWMNCRP_USEWINDOWSTYLE,
+  DWMNCRP_DISABLED,
+  DWMNCRP_ENABLED,
+  DWMNCRP_LAST
+} DWMNCRENDERINGPOLICY;
+
+typedef enum _DWMWINDOWATTRIBUTE { 
+  DWMWA_NCRENDERING_ENABLED          =  1,
+  DWMWA_NCRENDERING_POLICY,          // 2
+  DWMWA_TRANSITIONS_FORCEDISABLED,   // 3
+  DWMWA_ALLOW_NCPAINT,               // 4
+  DWMWA_CAPTION_BUTTON_BOUNDS,       // 5
+  DWMWA_NONCLIENT_RTL_LAYOUT,        // 6
+  DWMWA_FORCE_ICONIC_REPRESENTATION, // 7
+  DWMWA_FLIP3D_POLICY,               // 8
+  DWMWA_EXTENDED_FRAME_BOUNDS,       // 9
+  DWMWA_HAS_ICONIC_BITMAP,           // 10
+  DWMWA_DISALLOW_PEEK,               // 11
+  DWMWA_EXCLUDED_FROM_PEEK,          // 12
+  DWMWA_CLOAK,                       // 13
+  DWMWA_CLOAKED,                     // 14
+  DWMWA_FREEZE_REPRESENTATION,       // 15
+  DWMWA_LAST                         // 16
+} DWMWINDOWATTRIBUTE;
+
 static HRESULT (WINAPI * pDwmIsCompositionEnabled)(BOOL *) = 0;
 static HRESULT (WINAPI * pDwmExtendFrameIntoClientArea)(HWND, const MARGINS *) = 0;
+static HRESULT (WINAPI * pSetWindowCompositionAttribute)(HWND, WINCOMPATTR *) = 0;
+static HRESULT (WINAPI * pDwmSetWindowAttribute)(HWND, DWORD dwAttribute, LPCVOID pvAttribute,
+  DWORD cbAttribute) = 0;
+BOOL (WINAPI * pAlphaBlend)(HDC hdcDest, int xoriginDest, int yoriginDest,
+  int wDest, int hDest, HDC hdcSrc, int xoriginSrc, int yoriginSrc,
+  int wSrc, int hSrc, BLENDFUNCTION ftn) = 0;
+HRESULT (WINAPI * pDrawThemeTextEx)(HTHEME hTheme, HDC hdc, int iPartId, int iStateId,
+  LPCWSTR pszText, int iCharCount, DWORD dwFlags, LPRECT pRect, const DTTOPTS *pOptions) = 0;
+HTHEME (WINAPI * pOpenThemeData)(HWND hwnd, LPCWSTR pszClassList) = 0;
+HTHEME (WINAPI * pCloseThemeData)(HWND hwnd) = 0;
+
 
 // Helper for loading a system library. Using LoadLibrary() directly is insecure
 // because Windows might be searching the current working directory first.
@@ -77,6 +143,27 @@ load_dwm_funcs(void)
       (void *)GetProcAddress(dwm, "DwmIsCompositionEnabled");
     pDwmExtendFrameIntoClientArea =
       (void *)GetProcAddress(dwm, "DwmExtendFrameIntoClientArea");
+    pDwmSetWindowAttribute =
+      (void *)GetProcAddress(dwm, "DwmSetWindowAttribute");
+  }
+  HMODULE user32 = load_sys_library("user32.dll");
+  if (user32) {
+    pSetWindowCompositionAttribute =
+      (void *)GetProcAddress(user32, "SetWindowCompositionAttribute");
+  }
+  HMODULE msimg32 = load_sys_library("msimg32.dll");
+  if (msimg32) {
+    pAlphaBlend =
+      (void *)GetProcAddress(msimg32, "AlphaBlend");
+  }
+  HMODULE uxtheme = load_sys_library("uxtheme.dll");
+  if (uxtheme) {
+    pOpenThemeData =
+      (void *)GetProcAddress(uxtheme, "OpenThemeData");
+    pCloseThemeData =
+      (void *)GetProcAddress(uxtheme, "CloseThemeData");
+    pDrawThemeTextEx =
+      (void *)GetProcAddress(uxtheme, "DrawThemeTextEx");
   }
 }
 
@@ -421,10 +508,28 @@ win_is_glass_available(void)
 static void
 update_glass(void)
 {
-  if (pDwmExtendFrameIntoClientArea) {
-    bool enabled =
-      cfg.transparency == TR_GLASS && !win_is_fullscreen &&
-      !(cfg.opaque_when_focused && term.has_focus);
+  bool enabled =
+    cfg.transparency == TR_GLASS && !win_is_fullscreen &&
+    !(cfg.opaque_when_focused && term.has_focus);
+
+  // printf("Glass enabled? %s\n", enabled?"YES":"NO");
+
+  // TODO: find out if we are running on windows 10 or below.
+  // pSetWindowCompositionAttribute is available e.g. on 8.1,
+  // but we want to use the old method there.
+  if (false && pSetWindowCompositionAttribute) {
+    // printf("Setting accent\n");
+    WINCOMPATTR data;
+    data.dataSize = sizeof(data);
+    data.attribute = WCA_ACCENT_POLICY;
+    
+    WINCOMPATTR_DATA inner;
+    data.pData = &inner;
+    inner.AccentPolicy.accentState = enabled ? ACCENT_ENABLE_BLURBEHIND : ACCENT_DISABLED;
+    pSetWindowCompositionAttribute(wnd, &data); 
+  }
+  else if (pDwmExtendFrameIntoClientArea) {
+    // printf("Extending frame\n");
     pDwmExtendFrameIntoClientArea(wnd, &(MARGINS){enabled ? -1 : 0, 0, 0, 0});
   }
 }
@@ -1291,7 +1396,9 @@ main(int argc, char *argv[])
   // Initialise various other stuff.
   win_init_drop_target();
   win_init_menus();
-  update_transparency();
+  // This is not neccessary, and it creates artifacts
+  // if applied before the window is shown:
+  // update_transparency();
 
   // Create child process.
   child_create(

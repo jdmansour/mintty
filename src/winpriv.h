@@ -56,4 +56,34 @@ void win_set_ime_open(bool);
 
 bool win_is_fullscreen;
 
+BOOL (WINAPI * pAlphaBlend)(HDC hdcDest, int xoriginDest, int yoriginDest,
+    int wDest, int hDest, HDC hdcSrc, int xoriginSrc, int yoriginSrc,
+    int wSrc, int hSrc, BLENDFUNCTION ftn);
+
+typedef struct _DTTOPTS {
+  DWORD             dwSize;
+  DWORD             dwFlags;
+  COLORREF          crText;
+  COLORREF          crBorder;
+  COLORREF          crShadow;
+  int               iTextShadowType;
+  POINT             ptShadowOffset;
+  int               iBorderSize;
+  int               iFontPropId;
+  int               iColorPropId;
+  int               iStateId;
+  BOOL              fApplyOverlay;
+  int               iGlowSize;
+  // DTT_CALLBACK_PROC pfnDrawTextCallback;
+  void *            pfnDrawTextCallback;
+  LPARAM            lParam;
+} DTTOPTS, *PDTTOPTS;
+
+typedef HANDLE HTHEME;
+
+HRESULT (WINAPI * pDrawThemeTextEx)(HTHEME hTheme, HDC hdc, int iPartId, int iStateId,
+  LPCWSTR pszText, int iCharCount, DWORD dwFlags, LPRECT pRect, const DTTOPTS *pOptions);
+HTHEME (WINAPI * pOpenThemeData)(HWND hwnd, LPCWSTR pszClassList);
+HTHEME (WINAPI * pCloseThemeData)(HWND hwnd);
+
 #endif

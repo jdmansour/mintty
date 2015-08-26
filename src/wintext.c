@@ -332,6 +332,22 @@ win_paint(void)
   PAINTSTRUCT p;
   dc = BeginPaint(wnd, &p);
 
+  /* redirect drawing to off-screen bitmap */
+  HDC win_dc = dc;
+  HDC off_dc = CreateCompatibleDC(win_dc);
+  dc = off_dc;
+  
+  BITMAPINFO bmi;
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = p.rcPaint.right;
+  bmi.bmiHeader.biHeight = p.rcPaint.bottom;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  void *pBits;
+  HBITMAP off_bm = CreateDIBSection(off_dc, &bmi, DIB_RGB_COLORS, &pBits, 0, 0);
+  HBITMAP off_oldbm = SelectObject(off_dc, off_bm);
+
   term_invalidate(
     (p.rcPaint.left - PADDING) / font_width,
     (p.rcPaint.top - PADDING) / font_height,
@@ -363,6 +379,38 @@ win_paint(void)
     DeleteObject(SelectObject(dc, oldbrush));
     DeleteObject(SelectObject(dc, oldpen));
   }
+
+  /* set alpha channel */
+  for (int y=0; y<bmi.bmiHeader.biHeight; y++) {
+    BYTE *pPixel= (BYTE *) pBits + bmi.bmiHeader.biWidth * 4 * y;
+    for (int x=0; x<bmi.bmiHeader.biWidth ; x++) {
+      int alpha = 180;
+      pPixel[0] *= alpha/255.;
+      pPixel[1] *= alpha/255.;
+      pPixel[2] *= alpha/255.;
+      pPixel[3] = alpha;
+      pPixel+= 4;
+    }
+  }
+
+  /* clear region */
+  HBRUSH oldbrush = SelectObject(win_dc, CreateSolidBrush(BLACK_BRUSH));
+  Rectangle(win_dc, p.rcPaint.left, p.rcPaint.top, p.rcPaint.right, p.rcPaint.bottom);
+  DeleteObject(SelectObject(win_dc, oldbrush));
+
+  /* Copy offscreen bitmap to dc.  We don't want to merge the bitmap with what is
+   * already there, but replace the existing image - alpha channel included. */
+  BLENDFUNCTION ftn;
+  ftn.BlendOp = AC_SRC_OVER;
+  ftn.BlendFlags = 0;
+  ftn.SourceConstantAlpha = 255;
+  ftn.AlphaFormat = AC_SRC_ALPHA;
+  pAlphaBlend(win_dc, p.rcPaint.left, p.rcPaint.top,
+              p.rcPaint.right-p.rcPaint.left, p.rcPaint.bottom-p.rcPaint.top,
+              off_dc, p.rcPaint.left, p.rcPaint.top,
+              p.rcPaint.right-p.rcPaint.left, p.rcPaint.bottom-p.rcPaint.top, ftn);
+  DeleteObject(SelectObject(off_dc, off_oldbm));
+  DeleteDC(off_dc);
 
   EndPaint(wnd, &p);
 }
@@ -491,6 +539,105 @@ win_set_ime_open(bool open)
   }
 }
 
+/* 
+ * Drop-in replacement for ExTextOutW that does the right thing
+ * wrt. the alpha channel:  Draw text opaque, and the background
+ * semi-transparent (if it is the default bg color).  This hardcodes
+ * the background alpha, and chooses whether to use transparency
+ * by looking at the configuration.  A real API would have the alpha
+ * value as a parameter.
+ */
+static void
+MyExtTextOutW(HDC hdc, int X, int Y, UINT fuOptions, const RECT *lprc, LPCWSTR lpString,
+              UINT cbCount, const INT *lpDx)
+{
+  /* TODO: if we have one backing store bitmap, we can get around
+   * creating these intermediate ones and just write to that big one. */
+  HDC off_dc = CreateCompatibleDC(hdc);
+  BITMAPINFO bmi;
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = lprc->right-lprc->left;
+  bmi.bmiHeader.biHeight = lprc->bottom-lprc->top;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+
+  void *pBits;
+  HBITMAP off_bm = CreateDIBSection(off_dc, &bmi, DIB_RGB_COLORS, &pBits, 0, 0);
+  HBITMAP off_oldbm = SelectObject(off_dc, off_bm);
+
+  if (fuOptions & ETO_OPAQUE)
+  {
+    fuOptions = fuOptions & ~ETO_OPAQUE;
+    SetBkMode(off_dc, GetBkMode(hdc));
+    SetBkColor(off_dc, GetBkColor(hdc));
+    SetTextColor(off_dc, GetTextColor(hdc));
+    SelectObject(off_dc, GetCurrentObject(hdc, OBJ_FONT));
+    HBRUSH oldbrush = SelectObject(off_dc, CreateSolidBrush(GetBkColor(hdc)));
+    Rectangle(off_dc, 0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight);
+    DeleteObject(SelectObject(off_dc, oldbrush));
+  }
+  
+  int alpha = 255;
+  COLORREF bgcolor = GetBkColor(hdc);
+  if (bgcolor == colours[BG_COLOUR_I]) {
+    alpha = 180;
+  }
+
+  RECT rcTranslated = {0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight};
+  ExtTextOutW(off_dc, 0, 0, fuOptions, &rcTranslated, lpString, cbCount, lpDx);
+
+  for (int y = 0; y < bmi.bmiHeader.biHeight; y++) {
+    BYTE *pTmp = (BYTE *) pBits + bmi.bmiHeader.biWidth * 4 * y;
+    for (int x = 0; x < bmi.bmiHeader.biWidth; x++) {
+      // hack hack hack
+      if (GetRValue(bgcolor) == pTmp[2] && GetGValue(bgcolor) == pTmp[1] && GetBValue(bgcolor) == pTmp[0]) {
+        pTmp[0] *= alpha/255.;
+        pTmp[1] *= alpha/255.;
+        pTmp[2] *= alpha/255.;
+        pTmp[3] = alpha;
+      } else {
+        pTmp[3] = 255;
+      }
+      pTmp += 4;
+    }
+  }
+
+  // DrawThemeTextEx is alpha-aware, to use it we would do something like 
+  // this (below, incomplete).  We'd also have to figure out a replacement
+  // for the lpDx parameter, the opaque flag, etc.  You can pass a drawing
+  // callback to DrawThemeTextEx, maybe we could just call ExtTextOutW in
+  // the callback.  Or, we could investigate using DirectWrite.
+
+  // static HTHEME theme;
+  // if (!theme)
+  //   theme = pOpenThemeData(WindowFromDC(hdc), 0);
+  // DTTOPTS options;
+  // options.dwSize = sizeof(DTTOPTS);
+  // options.crText = GetTextColor(hdc);
+  // options.dwFlags = 0;//DTT_TEXTCOLOR; // DTT_COMPOSITED
+  // DWORD dwFlags = 0;
+  // RECT rcTranslated = {0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight};
+  // // todo: handle clipping and rtl
+  // pDrawThemeTextEx(theme, off_dc, 0, 0, lpString, cbCount, dwFlags, &rcTranslated, &options);
+  // pCloseThemeData(theme);
+
+  HBRUSH oldbrush = SelectObject(hdc, CreateSolidBrush(BLACK_BRUSH));
+  Rectangle(hdc, lprc->left, lprc->top, lprc->right, lprc->bottom);
+  DeleteObject(SelectObject(hdc, oldbrush));
+
+  BLENDFUNCTION ftn;
+  ftn.BlendOp = AC_SRC_OVER;
+  ftn.BlendFlags = 0;
+  ftn.SourceConstantAlpha = 255;
+  ftn.AlphaFormat = AC_SRC_ALPHA;
+  pAlphaBlend(hdc, X, Y,
+              bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight,
+              off_dc, 0, 0,
+              bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight, ftn);
+  DeleteObject(SelectObject(off_dc, off_oldbm));
+  DeleteDC(off_dc);
+}
 
 /*
  * Draw a line of text in the window, at given character
@@ -658,12 +805,12 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
 
  /* Finally, draw the text */
   SetBkMode(dc, OPAQUE);
-  ExtTextOutW(dc, xt, yt, eto_options | ETO_OPAQUE, &box, text, len, dxs);
+  MyExtTextOutW(dc, xt, yt, eto_options | ETO_OPAQUE, &box, text, len, dxs);
 
  /* Shadow bold */
   if (apply_shadow && bold_mode == BOLD_SHADOW && (attr.attr & ATTR_BOLD)) {
     SetBkMode(dc, TRANSPARENT);
-    ExtTextOutW(dc, xt + 1, yt, eto_options, &box, text, len, dxs);
+    MyExtTextOutW(dc, xt + 1, yt, eto_options, &box, text, len, dxs);
   }
 
  /* Manual underline */
