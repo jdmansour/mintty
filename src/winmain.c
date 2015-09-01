@@ -505,6 +505,32 @@ win_is_glass_available(void)
   return result;
 }
 
+static bool
+win_is_blurbehind_available(void)
+{
+  // printf("win_is_blurbehind_available()\n");
+  static int available = -1;
+  if (available == -1) {
+    HMODULE ntdll = load_sys_library("ntdll.dll");
+    LONG (WINAPI* pRtlGetVersion)(RTL_OSVERSIONINFOEXW*) =
+      (void*)GetProcAddress(ntdll, "RtlGetVersion");
+
+    if (!pRtlGetVersion) {
+      // should never happen
+      available = 0;
+      return (bool) available;
+    }
+
+    RTL_OSVERSIONINFOEXW osVer;
+    memset(&osVer, 0, sizeof(RTL_OSVERSIONINFOEXW));
+    osVer.dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOEXW);
+    pRtlGetVersion(&osVer);
+    // printf("OS Version: %ld.%ld.%ld\n", osVer.dwMajorVersion, osVer.dwMinorVersion, osVer.dwBuildNumber);
+    available = osVer.dwMajorVersion >= 10;
+  }
+  return (bool) available;
+}
+
 static void
 update_glass(void)
 {
@@ -517,8 +543,10 @@ update_glass(void)
   // TODO: find out if we are running on windows 10 or below.
   // pSetWindowCompositionAttribute is available e.g. on 8.1,
   // but we want to use the old method there.
-  if (false && pSetWindowCompositionAttribute) {
-    // printf("Setting accent\n");
+  printf("win_is_blurbehind_available(): %s\n", win_is_blurbehind_available() ? "true" : "false");
+  if (win_is_blurbehind_available() && pSetWindowCompositionAttribute) {
+    printf("Setting accent\n");
+    printf("enabled: %s\n", enabled ? "true" : "false");
     WINCOMPATTR data;
     data.dataSize = sizeof(data);
     data.attribute = WCA_ACCENT_POLICY;
@@ -529,7 +557,7 @@ update_glass(void)
     pSetWindowCompositionAttribute(wnd, &data); 
   }
   else if (pDwmExtendFrameIntoClientArea) {
-    // printf("Extending frame\n");
+    printf("Extending frame\n");
     pDwmExtendFrameIntoClientArea(wnd, &(MARGINS){enabled ? -1 : 0, 0, 0, 0});
   }
 }
