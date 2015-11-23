@@ -13,7 +13,6 @@ also available for [MSYS](http://mingw.org/wiki/MSYS).
   * The current way of drawing text with alpha is a bit wasteful, for each drawing a temporary bitmap is created.  This can be improved in future by using only one single temporary bitmap with the size of the window.
   * Also, it is a bit hackish - we use ExtTextOut which doesn't understand alpha.  Then we go through the bitmap and set pixels which are the background color to transparent.  This might result in antialiasing artifacts around letters if the background is made very transparent.
   * The line cursors are not drawn properly with glass, as I don't set the alpha channel yet.
-  * Windows 10 is not yet detected.  You currently have to edit the `update_glass` function in `winmain.c` to choose the correct blurring method.
 
 #### Future intended features: ####
 
