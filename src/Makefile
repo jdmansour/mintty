@@ -20,6 +20,10 @@ NAME := mintty
 
 .PHONY: exe src pkg zip pdf clean
 
+BINFOLDER = ../bin
+#BINDIR = $(BINFOLDER)/$(TARGET)
+BINDIR = $(BINFOLDER)/$(platform)
+
 ifdef TARGET
   CC := $(TARGET)-gcc
   RC := $(TARGET)-windres
@@ -67,6 +71,7 @@ name_ver := $(NAME)-$(version)
 c_srcs := $(wildcard *.c)
 rc_srcs := $(wildcard *.rc)
 objs := $(c_srcs:.c=.o) $(rc_srcs:.rc=.o)
+bins := $(patsubst %.o,$(BINDIR)/%.o,$(objs))
 
 CFLAGS := -std=gnu99 -include std.h -Wall -Wextra -Wundef -Werror
 
@@ -93,14 +98,23 @@ endif
 #############################################################################
 # build
 
+all:	bin
+
 DEPOPT=-MMD -MP
 #DEPOPT=
 
 %.o: %.c
 	$(CC) -c $(DEPOPT) $(CPPFLAGS) $(CFLAGS) $<
 
-%.o: %.rc
+$(BINDIR)/%.o: %.c
+	$(CC) -c $(DEPOPT) $(CPPFLAGS) $(CFLAGS) $< -o $(BINDIR)/$*.o
+
+%.o: %.rc %.mft
 	$(RC) --preprocessor '$(CC) -E -xc -DRC_INVOKED $(DEPOPT) $(CPPFLAGS)' $< $*.o
+
+$(BINDIR)/%.o: %.rc %.mft
+	$(RC) --preprocessor '$(CC) -E -xc -DRC_INVOKED $(DEPOPT) $(CPPFLAGS)' $< $(BINDIR)/$*.o
+	-mv $*.d $(BINDIR)/
 
 exe := $(NAME).exe
 exe: $(exe)
@@ -108,7 +122,30 @@ $(exe): $(objs)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 	-du -b $@
 
--include $(wildcard *.d)
+bin := $(BINDIR)/$(NAME).exe
+bin: $(BINDIR) $(bin)
+$(BINDIR):
+	mkdir -p $(BINDIR)
+$(bin): $(bins)
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	cp -f $@ $(BINFOLDER)/		# for 'dobin' install in .cygport
+	-test -f `basename $@` && cp -f $@ ./	# support simpler debugging
+	-type du && du -b $@ || true
+
+#-include $(wildcard *.d)
+-include $(wildcard $(BINDIR)/*.d)
+
+#############################################################################
+# generate
+
+rgb:	# /usr/share/X11/rgb.txt # X11 color names
+#	255 250 250		snow
+#	->
+#		{255, 250, 250, "snow"},
+	sed -e 's,	, ,g' -e 's/ *\([0-9][0-9]*\) *\([0-9][0-9]*\) *\([0-9][0-9]*\) *\([^ ].*[^ ]\) */	{\1, \2, \3, "\4"},/' /usr/share/X11/rgb.txt > rgb.t
+
+combined.t:	# UnicodeData.txt
+	sh ./mkcombinedt > combined.t
 
 #############################################################################
 # release targets
@@ -147,22 +184,48 @@ $(html): ../docs/$(NAME).1
 	groff -t -man -Thtml $< > $@
 
 clean:
-	rm -rf *.d *.o $(NAME)*
+	#rm -rf *.d *.o $(NAME)*
+	rm -rf $(BINDIR)/*.d $(BINDIR)/*.o $(BINDIR)/$(NAME)*
 
+check:	checksrc checkresource
+
+# check whether supportedOS Id list is up-to-date
 stripsupp=sed -e "/supportedOS/ s,>.*,>," -e t -e d
 defsupp=/usr/lib/default-manifest.o
-check:
-	if egrep -a -e "^(printf|#define debug)" *.[hc]; then false; fi
+checkresource:
 	$(stripsupp) res.mft > .osmin
 	cat "$(defsupp)" /dev/null | strings | $(stripsupp) > .osdef
 	if [ -f "$(defsupp)" ]; then diff .osdef .osmin; else true; fi
 	rm -f .osdef .osmin
+
+# check whether sources are free of remaining debugging code
+checksrc:
+	if egrep -a -e "^(printf|#define debug)" *.[hc]; then false; fi
+	if egrep -e "^(if|do|for|while) *[({]" *.c; then false; fi
+	if egrep -e "\((false|0) *&" *.c; then false; fi
 
 #############################################################################
 # development and debug targets
 
 tags:	*.c *.h
 	ctags -w *.c *.h
+
+wm_names.t:	# Windows Message names, only for debugging
+#	#define WM_NULL 0x0000
+#	->
+#		{0x0000, "WM_NULL"},
+	sed -e 's/^#define \(WM_[^ ]*\) \(0x[0-9A-Fa-f]*\)$$/	{\2, "\1"},/' -e t -e d /usr/include/w32api/winuser.h > wm_names.t
+
+vk_names.t:	# Windows Virtual Key Code names, only for debugging
+#	#define VK_TAB 0x09
+#	->
+#		{0x09, "VK_TAB"},
+	sed -e 's/^#define \(VK_[^ ]*\) \(0x[0-9A-Fa-f]*\)$$/	{\2, "\1"},/' -e t -e d /usr/include/w32api/winuser.h > vk_names.t
+
+target:
+	echo $(TARGET)
+	echo $(BINDIR)
+	echo $(bins)
 
 getappinfo=$(shell echo "$(1)" ; echo "$(1)" | cpp -P $(CPPFLAGS) --include appinfo.h)
 

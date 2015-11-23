@@ -22,7 +22,7 @@ enum { DEFAULT_COLOUR = UINT_MAX };
 static inline colour
 make_colour(uchar r, uchar g, uchar b) { return r | g << 8 | b << 16; }
 
-bool parse_colour(string, colour *);
+extern bool parse_colour(string, colour *);
 
 static inline uchar red(colour c) { return c; }
 static inline uchar green(colour c) { return c >> 8; }
@@ -42,7 +42,8 @@ typedef struct {
 
 typedef struct {
   // Looks
-  colour fg_colour, bg_colour, cursor_colour;
+  colour fg_colour, bold_colour, bg_colour, cursor_colour;
+  colour search_fg_colour, search_bg_colour, search_current_colour;
   char transparency;
   bool opaque_when_focused;
   char cursor_type;
@@ -63,10 +64,14 @@ typedef struct {
   bool window_shortcuts;
   bool switch_shortcuts;
   bool zoom_shortcuts;
+  bool zoom_font_with_window;
   bool alt_fn_shortcuts;
   bool ctrl_shift_shortcuts;
-  string break_string;
-  string pause_string;
+  string key_prtscreen;	// VK_SNAPSHOT
+  string key_pause;	// VK_PAUSE
+  string key_break;	// VK_CANCEL
+  string key_menu;	// VK_APPS
+  string key_scrlock;	// VK_SCROLL
   // Mouse
   bool copy_on_select;
   bool copy_as_rtf;
@@ -83,6 +88,7 @@ typedef struct {
   char scrollbar;
   char scroll_mod;
   bool pgupdn_scroll;
+  string search_bar;
   // Terminal
   string term;
   string answerback;
@@ -108,6 +114,8 @@ typedef struct {
   bool daemonize;
   // "Hidden"
   string app_id;
+  string app_name;
+  string app_launch_cmd;
   int col_spacing, row_spacing;
   string word_chars;
   string word_chars_excl;
@@ -119,12 +127,12 @@ typedef struct {
 
 extern config cfg, new_cfg;
 
-void init_config(void);
-void load_config(string filename);
-void set_arg_option(string name, string val);
-void parse_arg_option(string);
-void remember_arg(string);
-void finish_config(void);
-void copy_config(config *dst, const config *src);
+extern void init_config(void);
+extern void load_config(string filename, bool to_save);
+extern void set_arg_option(string name, string val);
+extern void parse_arg_option(string);
+extern void remember_arg(string);
+extern void finish_config(void);
+extern void copy_config(config *dst, const config *src);
 
 #endif

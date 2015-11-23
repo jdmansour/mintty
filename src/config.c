@@ -12,6 +12,8 @@
 #include <termios.h>
 #include <sys/cygwin.h>
 
+#define dont_debug_config
+
 #if CYGWIN_VERSION_API_MINOR >= 222
 static wstring rc_filename = 0;
 #else
@@ -21,7 +23,11 @@ static string rc_filename = 0;
 const config default_cfg = {
   // Looks
   .fg_colour = 0xBFBFBF,
+  .bold_colour = (colour)-1,
   .bg_colour = 0x000000,
+  .search_fg_colour = 0x000000,
+  .search_bg_colour = 0x00DDDD,
+  .search_current_colour = 0x0099DD,
   .cursor_colour = 0xBFBFBF,
   .transparency = 0,
   .opaque_when_focused = false,
@@ -43,10 +49,14 @@ const config default_cfg = {
   .window_shortcuts = true,
   .switch_shortcuts = true,
   .zoom_shortcuts = true,
+  .zoom_font_with_window = true,
   .alt_fn_shortcuts = true,
   .ctrl_shift_shortcuts = false,
-  .break_string = "",
-  .pause_string = "",
+  .key_prtscreen = "",	// VK_SNAPSHOT
+  .key_pause = "",	// VK_PAUSE
+  .key_break = "",	// VK_CANCEL
+  .key_menu = "",	// VK_APPS
+  .key_scrlock = "",	// VK_SCROLL
   // Mouse
   .copy_on_select = true,
   .copy_as_rtf = true,
@@ -64,6 +74,7 @@ const config default_cfg = {
   .scrollback_lines = 10000,
   .scroll_mod = MDK_SHIFT,
   .pgupdn_scroll = false,
+  .search_bar = "",
   // Terminal
   .term = "xterm",
   .answerback = "",
@@ -87,6 +98,8 @@ const config default_cfg = {
   .daemonize = true,
   // "Hidden"
   .app_id = "",
+  .app_name = "",
+  .app_launch_cmd = "",
   .col_spacing = 0,
   .row_spacing = 0,
   .word_chars = "",
@@ -133,7 +146,11 @@ static const struct {
 options[] = {
   // Looks
   {"ForegroundColour", OPT_COLOUR, offcfg(fg_colour)},
+  {"BoldColour", OPT_COLOUR, offcfg(bold_colour)},
   {"BackgroundColour", OPT_COLOUR, offcfg(bg_colour)},
+  {"SearchForegroundColour", OPT_COLOUR, offcfg(search_fg_colour)},
+  {"SearchBackgroundColour", OPT_COLOUR, offcfg(search_bg_colour)},
+  {"SearchCurrentColour", OPT_COLOUR, offcfg(search_current_colour)},
   {"CursorColour", OPT_COLOUR, offcfg(cursor_colour)},
   {"Transparency", OPT_TRANS, offcfg(transparency)},
   {"OpaqueWhenFocused", OPT_BOOL, offcfg(opaque_when_focused)},
@@ -159,10 +176,16 @@ options[] = {
   {"WindowShortcuts", OPT_BOOL, offcfg(window_shortcuts)},
   {"SwitchShortcuts", OPT_BOOL, offcfg(switch_shortcuts)},
   {"ZoomShortcuts", OPT_BOOL, offcfg(zoom_shortcuts)},
+  {"ZoomFontWithWindow", OPT_BOOL, offcfg(zoom_font_with_window)},
   {"AltFnShortcuts", OPT_BOOL, offcfg(alt_fn_shortcuts)},
   {"CtrlShiftShortcuts", OPT_BOOL, offcfg(ctrl_shift_shortcuts)},
-  {"Break", OPT_STRING, offcfg(break_string)},
-  {"Pause", OPT_STRING, offcfg(pause_string)},
+  {"Key_PrintScreen", OPT_STRING, offcfg(key_prtscreen)},
+  {"Key_Pause", OPT_STRING, offcfg(key_pause)},
+  {"Key_Break", OPT_STRING, offcfg(key_break)},
+  {"Key_Menu", OPT_STRING, offcfg(key_menu)},
+  {"Key_ScrollLock", OPT_STRING, offcfg(key_scrlock)},
+  {"Break", OPT_STRING, offcfg(key_break)},  // compatibility alternative
+  {"Pause", OPT_STRING, offcfg(key_pause)},  // compatibility alternative
 
   // Mouse
   {"CopyOnSelect", OPT_BOOL, offcfg(copy_on_select)},
@@ -182,6 +205,7 @@ options[] = {
   {"Scrollbar", OPT_SCROLLBAR, offcfg(scrollbar)},
   {"ScrollMod", OPT_MOD, offcfg(scroll_mod)},
   {"PgUpDnScroll", OPT_BOOL, offcfg(pgupdn_scroll)},
+  {"SearchBar", OPT_STRING, offcfg(search_bar)},
 
   // Terminal
   {"Term", OPT_STRING, offcfg(term)},
@@ -211,6 +235,8 @@ options[] = {
 
   // "Hidden"
   {"AppID", OPT_STRING, offcfg(app_id)},
+  {"AppName", OPT_STRING, offcfg(app_name)},
+  {"AppLaunchCmd", OPT_STRING, offcfg(app_launch_cmd)},
   {"ColSpacing", OPT_INT, offcfg(col_spacing)},
   {"RowSpacing", OPT_INT, offcfg(row_spacing)},
   {"WordChars", OPT_STRING, offcfg(word_chars)},
@@ -385,17 +411,38 @@ check_legacy_options(void (*remember_option)(uint))
   }
 }
 
+static struct {
+  uchar r, g, b;
+  char * name;
+} xcolours[] = {
+#include "rgb.t"
+};
+
 bool
 parse_colour(string s, colour *cp)
 {
   uint r, g, b;
-  if (sscanf(s, "%u,%u,%u%c", &r, &g, &b, &(char){0}) == 3);
-  else if (sscanf(s, "#%2x%2x%2x%c", &r, &g, &b, &(char){0}) == 3);
-  else if (sscanf(s, "rgb:%2x/%2x/%2x%c", &r, &g, &b, &(char){0}) == 3);
+  if (sscanf(s, "%u,%u,%u%c", &r, &g, &b, &(char){0}) == 3)
+    ;
+  else if (sscanf(s, "#%2x%2x%2x%c", &r, &g, &b, &(char){0}) == 3)
+    ;
+  else if (sscanf(s, "rgb:%2x/%2x/%2x%c", &r, &g, &b, &(char){0}) == 3)
+    ;
   else if (sscanf(s, "rgb:%4x/%4x/%4x%c", &r, &g, &b, &(char){0}) == 3)
     r >>=8, g >>= 8, b >>= 8;
-  else
-    return false;
+  else {
+    int coli = -1;
+    for (uint i = 0; i < lengthof(xcolours); i++)
+      if (!strcmp(s, xcolours[i].name)) {
+        r = xcolours[i].r;
+        g = xcolours[i].g;
+        b = xcolours[i].b;
+        coli = i;
+        break;
+      }
+    if (coli < 0)
+      return false;
+  }
 
   *cp = make_colour(r, g, b);
   return true;
@@ -497,15 +544,23 @@ parse_arg_option(string option)
 }
 
 void
-load_config(string filename)
+load_config(string filename, bool to_save)
 {
-  file_opts_num = arg_opts_num = 0;
+  if (access(filename, R_OK) == 0 && access(filename, W_OK) < 0)
+    to_save = false;
 
-  delete(rc_filename);
+  if (to_save) {
+    file_opts_num = arg_opts_num = 0;
+
+    delete(rc_filename);
 #if CYGWIN_VERSION_API_MINOR >= 222
-  rc_filename = cygwin_create_path(CCP_POSIX_TO_WIN_W, filename);
+    rc_filename = cygwin_create_path(CCP_POSIX_TO_WIN_W, filename);
 #else
-  rc_filename = strdup(filename);
+    rc_filename = strdup(filename);
+#endif
+  }
+#ifdef debug_config
+  printf ("will save to %s? %d\n", filename, to_save);
 #endif
 
   FILE *file = fopen(filename, "r");
@@ -515,7 +570,7 @@ load_config(string filename)
       line[strcspn(line, "\r\n")] = 0;  /* trim newline */
       if (line[0] != '#' && line[0] != '\0') {
         int i = parse_option(line);
-        if (i >= 0)
+        if (to_save && i >= 0)
           remember_file_option(i);
       }
     }
@@ -645,7 +700,7 @@ save_config(void)
 static control *cols_box, *rows_box, *locale_box, *charset_box;
 
 static void
-apply_config(void)
+apply_config(bool save)
 {
   // Record what's changed
   for (uint i = 0; i < lengthof(options); i++) {
@@ -667,14 +722,15 @@ apply_config(void)
   }
 
   win_reconfig();
-  save_config();
+  if (save)
+    save_config();
 }
 
 static void
 ok_handler(control *unused(ctrl), int event)
 {
   if (event == EVENT_ACTION) {
-    apply_config();
+    apply_config(true);
     dlg_end();
   }
 }
@@ -690,7 +746,7 @@ static void
 apply_handler(control *unused(ctrl), int event)
 {
   if (event == EVENT_ACTION)
-    apply_config();
+    apply_config(false);
 }
 
 static void
@@ -840,7 +896,7 @@ setup_config_box(controlbox * b)
   ctrl_columns(s, 5, 20, 20, 20, 20, 20);
   c = ctrl_pushbutton(s, "About...", about_handler, 0);
   c->column = 0;
-  c = ctrl_pushbutton(s, "OK", ok_handler, 0);
+  c = ctrl_pushbutton(s, "Save", ok_handler, 0);
   c->button.isdefault = true;
   c->column = 2;
   c = ctrl_pushbutton(s, "Cancel", cancel_handler, 0);
@@ -940,10 +996,15 @@ setup_config_box(controlbox * b)
   * The Keys panel.
   */
   s = ctrl_new_set(b, "Keys", null);
+  ctrl_columns(s, 2, 50, 50);
   ctrl_checkbox(
-    s, "&Backspace sends ^H",
+    s, "&Backarrow sends ^H",
     dlg_stdcheckbox_handler, &new_cfg.backspace_sends_bs
-  );
+  )->column = 0;
+  ctrl_checkbox(
+    s, "&Delete sends DEL",
+    dlg_stdcheckbox_handler, &new_cfg.delete_sends_del
+  )->column = 1;
   ctrl_checkbox(
     s, "Ctrl+LeftAlt is Alt&Gr",
     dlg_stdcheckbox_handler, &new_cfg.ctrl_alt_is_altgr
@@ -993,13 +1054,23 @@ setup_config_box(controlbox * b)
     dlg_stdcheckbox_handler, &new_cfg.clicks_place_cursor
   );
 
-  s = ctrl_new_set(b, "Mouse", "Right click action");
+  s = ctrl_new_set(b, "Mouse", "Click actions");
   ctrl_radiobuttons(
-    s, null, 4,
+    s, "Right mouse button", 4,
     dlg_stdradiobutton_handler, &new_cfg.right_click_action,
     "&Paste", RC_PASTE,
     "E&xtend", RC_EXTEND,
-    "Show &menu", RC_MENU,
+    "&Menu", RC_MENU,
+    "Ente&r", RC_ENTER,
+    null
+  );
+  ctrl_radiobuttons(
+    s, "Middle mouse button", 4,
+    dlg_stdradiobutton_handler, &new_cfg.middle_click_action,
+    "&Paste", MC_PASTE,
+    "E&xtend", MC_EXTEND,
+    "&Nothing", MC_VOID,
+    "Ente&r", MC_ENTER,
     null
   );
 

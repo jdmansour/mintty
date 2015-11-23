@@ -56,6 +56,7 @@ sigexit(int sig)
   if (pid)
     kill(-pid, SIGHUP);
   signal(sig, SIG_DFL);
+  report_pos();
   kill(getpid(), sig);
 }
 
@@ -230,22 +231,22 @@ child_proc(void)
 
         // Decide whether we want to exit now or later
         if (killed || cfg.hold == HOLD_NEVER)
-          exit(0);
+          exit_mintty();
         else if (cfg.hold == HOLD_START) {
           if (WIFSIGNALED(status) || WEXITSTATUS(status) != 255)
-            exit(0);
+            exit_mintty();
         }
         else if (cfg.hold == HOLD_ERROR) {
           if (WIFEXITED(status)) {
             if (WEXITSTATUS(status) == 0)
-              exit(0);
+              exit_mintty();
           }
           else {
             const int error_sigs =
               1<<SIGILL | 1<<SIGTRAP | 1<<SIGABRT | 1<<SIGFPE |
               1<<SIGBUS | 1<<SIGSEGV | 1<<SIGPIPE | 1<<SIGSYS;
             if (!(error_sigs & 1<<WTERMSIG(status)))
-              exit(0);
+              exit_mintty();
           }
         }
 
@@ -325,7 +326,7 @@ child_kill(bool point_blank)
   if (!pid ||
       kill(-pid, point_blank ? SIGKILL : SIGHUP) < 0 ||
       point_blank)
-    exit(0);
+    exit_mintty();
   killed = true;
 }
 
@@ -508,7 +509,7 @@ child_conv_path(wstring wpath)
 }
 
 void
-child_fork(int argc, char *argv[])
+child_fork(int argc, char *argv[], int moni)
 {
   pid_t clone = fork();
 
@@ -528,7 +529,7 @@ child_fork(int argc, char *argv[])
       exit(255);
     }
     if (clone > 0) {  // new parent / previous child
-      exit (0);  // exit and make the grandchild a daemon
+      exit(0);  // exit and make the grandchild a daemon
     }
   }
 
@@ -569,13 +570,18 @@ child_fork(int argc, char *argv[])
     (void) argc;
 #endif
 
+    void setenvi(char * env, int val) {
+      char valbuf[22];
+      sprintf(valbuf, "%d", val);
+      setenv(env, valbuf, true);
+    }
+
     // provide environment to clone size
-    char parbuf1[34];
-    sprintf (parbuf1, "MINTTY_ROWS=%d", term.rows);
-    putenv (parbuf1);
-    char parbuf2[34];
-    sprintf (parbuf2, "MINTTY_COLS=%d", term.cols);
-    putenv (parbuf2);
+    setenvi("MINTTY_ROWS", term.rows);
+    setenvi("MINTTY_COLS", term.cols);
+    // provide environment to select monitor
+    if (moni > 0)
+      setenvi("MINTTY_MONITOR", moni);
 
 #if CYGWIN_VERSION_DLL_MAJOR >= 1005
     execv("/proc/self/exe", argv);

@@ -4,6 +4,7 @@
 // Licensed under the terms of the GNU General Public License v3 or later.
 
 #include "winpriv.h"
+#include "winsearch.h"
 
 #include "minibidi.h"
 
@@ -71,7 +72,7 @@ static const wchar linedraw_chars[LDRAW_CHAR_NUM][LDRAW_CHAR_TRIES] = {
 #define OPAQUE_ALPHA 255
 #define MEDIUM_ALPHA 207
 
-static enum {BOLD_NONE, BOLD_SHADOW, BOLD_FONT} bold_mode;
+static enum {/*unused*/BOLD_NONE, BOLD_SHADOW, BOLD_FONT} bold_mode;
 static enum {UND_LINE, UND_FONT} und_mode;
 static int descent;
 
@@ -85,14 +86,7 @@ static bool font_dualwidth;
 bool font_ambig_wide;
 
 COLORREF colours[COLOUR_NUM];
-
-static colour
-brighten(colour c)
-{
-  uint r = red(c), g = green(c), b = blue(c);
-  uint s = min(85, 255 - max(max(r, g), b));
-  return make_colour(r + s, g + s, b + s);
-}
+static bool bold_colour_selected = false;
 
 static uint
 colour_dist(colour a, colour b)
@@ -101,6 +95,61 @@ colour_dist(colour a, colour b)
     2 * sqr(red(a) - red(b)) +
     4 * sqr(green(a) - green(b)) +
     1 * sqr(blue(a) - blue(b));
+}
+
+#define dont_debug_brighten
+
+static colour
+brighten(colour c, colour against)
+{
+  uint r = red(c), g = green(c), b = blue(c);
+  // "brighten" away from the background:
+  // if we are closer to black than the contrast reference, rather darken
+  bool darken = colour_dist(c, 0) < colour_dist(against, 0);
+#ifdef debug_brighten
+  printf ("%s %06X against %06X\n", darken ? "darkening" : "brighting", c, against);
+#endif
+
+  uint _brighter() {
+    uint s = min(85, 255 - max(max(r, g), b));
+    return make_colour(r + s, g + s, b + s);
+  }
+  uint _darker() {
+    int sub = 70;
+    return make_colour(max(0, (int)r - sub), max(0, (int)g - sub), max(0, (int)b - sub));
+  }
+
+  colour bright;
+  uint thrsh = 22222;  // contrast threshhold;
+                       // if we're closer to either fg or bg,
+                       // turn "brightening" into the other direction
+
+  if (darken) {
+    bright = _darker();
+#ifdef debug_brighten
+    printf ("darker %06X -> %06X dist %d\n", c, bright, colour_dist(c, bright));
+#endif
+    if (colour_dist(bright, c) < thrsh || colour_dist(bright, against) < thrsh) {
+      bright = _brighter();
+#ifdef debug_brighten
+      printf ("   fix %06X -> %06X dist %d/%d\n", c, bright, colour_dist(bright, c), colour_dist(bright, against));
+#endif
+    }
+  }
+  else {
+    bright = _brighter();
+#ifdef debug_brighten
+    printf ("lightr %06X -> %06X dist %d\n", c, bright, colour_dist(c, bright));
+#endif
+    if (colour_dist(bright, c) < thrsh || colour_dist(bright, against) < thrsh) {
+      bright = _darker();
+#ifdef debug_brighten
+      printf ("   fix %06X -> %06X dist %d/%d\n", c, bright, colour_dist(bright, c), colour_dist(bright, against));
+#endif
+    }
+  }
+
+  return bright;
 }
 
 static uint
@@ -381,7 +430,6 @@ win_paint(void)
 
     DeleteObject(SelectObject(dc, oldbrush));
     DeleteObject(SelectObject(dc, oldpen));
-  }
 
     /* set alpha channel in border region */
     for (int y=p.rcPaint.top; y<p.rcPaint.bottom; y++) {
@@ -423,6 +471,10 @@ do_update(void)
   update_state = UPDATE_BLOCKED;
 
   dc = GetDC(wnd);
+
+  win_paint_exclude_search(dc);
+  term_update_search();
+
   term_paint();
   ReleaseDC(wnd, dc);
 
@@ -688,13 +740,19 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
   }
   if (attr.attr & ATTR_BOLD && cfg.bold_as_colour) {
     if (fgi < 8) {
-      if (colours[fgi] != colours[fgi | 8])
-        apply_shadow = false;
+      apply_shadow = false;
+#ifdef enforce_bold
+      if (colours[fgi] == colours[fgi | 8])
+        apply_shadow = true;
+#endif
       fgi |= 8;     // (BLACK|...|WHITE)_I -> BOLD_(BLACK|...|WHITE)_I
     }
-    else if (fgi >= 256 && !cfg.bold_as_font) {
-      if (colours[fgi] != colours[fgi | 1])
-        apply_shadow = false;
+    else if (fgi >= 256 && fgi != TRUE_COLOUR && !cfg.bold_as_font) {
+      apply_shadow = false;
+#ifdef enforce_bold
+      if (colours[fgi] == colours[fgi | 1])
+        apply_shadow = true;
+#endif
       fgi |= 1;     // (FG|BG)_COLOUR_I -> BOLD_(FG|BG)_COLOUR_I
     }
   }
@@ -721,6 +779,15 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
 
   bool has_cursor = attr.attr & (TATTR_ACTCURS | TATTR_PASCURS);
   colour cursor_colour = 0;
+
+  if (attr.attr & TATTR_CURRESULT) {
+    bg = cfg.search_current_colour;
+    fg = cfg.search_fg_colour;
+  }
+  else if (attr.attr & TATTR_RESULT) {
+    bg = cfg.search_bg_colour;
+    fg = cfg.search_fg_colour;
+  }
 
   if (has_cursor) {
     cursor_colour = colours[ime_open ? IME_CURSOR_COLOUR_I : CURSOR_COLOUR_I];
@@ -791,7 +858,7 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
   SetBkMode(dc, OPAQUE);
   MyExtTextOutW(dc, xt, yt, eto_options | ETO_OPAQUE, &box, text, len, dxs);
 
- /* Shadow bold */
+ /* Shadow/Overstrike bold */
   if (apply_shadow && bold_mode == BOLD_SHADOW && (attr.attr & ATTR_BOLD)) {
     SetBkMode(dc, TRANSPARENT);
     MyExtTextOutW(dc, xt + 1, yt, eto_options, &box, text, len, dxs);
@@ -934,12 +1001,46 @@ win_set_colour(colour_i i, colour c)
 {
   if (i >= COLOUR_NUM)
     return;
+  if (c == (colour)-1) {
+    // ... reset to default ...
+    if (i == BOLD_FG_COLOUR_I) {
+      bold_colour_selected = false;
+      if (cfg.bold_colour != (colour)-1)
+        colours[BOLD_FG_COLOUR_I] = cfg.bold_colour;
+      else
+        colours[BOLD_FG_COLOUR_I] = brighten(colours[FG_COLOUR_I], colours[BG_COLOUR_I]);
+    }
+    return;
+  }
   colours[i] = c;
+#ifdef debug_brighten
+  printf ("colours[%d] = %06X\n", i, c);
+#endif
   switch (i) {
     when FG_COLOUR_I:
-      colours[BOLD_FG_COLOUR_I] = brighten(c);
+      // should we make this conditional, 
+      // unless bold colour has been set explicitly?
+      if (!bold_colour_selected) {
+        if (cfg.bold_colour != (colour)-1)
+          colours[BOLD_FG_COLOUR_I] = cfg.bold_colour;
+        else {
+          colours[BOLD_FG_COLOUR_I] = brighten(c, colours[BG_COLOUR_I]);
+          // renew this too as brighten() may refer to contrast colour:
+          colours[BOLD_BG_COLOUR_I] = brighten(colours[BG_COLOUR_I], colours[FG_COLOUR_I]);
+        }
+      }
+    when BOLD_FG_COLOUR_I:
+      bold_colour_selected = true;
     when BG_COLOUR_I:
-      colours[BOLD_BG_COLOUR_I] = brighten(c);
+      if (!bold_colour_selected) {
+        if (cfg.bold_colour != (colour)-1)
+          colours[BOLD_FG_COLOUR_I] = cfg.bold_colour;
+        else {
+          colours[BOLD_BG_COLOUR_I] = brighten(c, colours[FG_COLOUR_I]);
+          // renew this too as brighten() may refer to contrast colour:
+          colours[BOLD_FG_COLOUR_I] = brighten(colours[FG_COLOUR_I], colours[BG_COLOUR_I]);
+        }
+      }
     when CURSOR_COLOUR_I: {
       // Set the colour of text under the cursor to whichever of foreground
       // and background colour is further away from the cursor colour.
@@ -955,7 +1056,10 @@ win_set_colour(colour_i i, colour c)
   win_invalidate_all();
 }
 
-colour win_get_colour(colour_i i) { return i < COLOUR_NUM ? colours[i] : 0; }
+colour win_get_colour(colour_i i)
+{
+  return i < COLOUR_NUM ? colours[i] : 0;
+}
 
 colour
 win_get_sys_colour(bool fg)

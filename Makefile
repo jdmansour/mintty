@@ -6,13 +6,16 @@
 # - pdf: PDF version of the manual page.
 # - clean: Delete generated files.
 # - upload: Upload cygwin packages for publishing.
+# - ann: Create cygwin announcement mail.
 
 # Variables intended for setting on the make command line.
 # - RELEASE: release number for packaging
 # - TARGET: target triple for cross compiling
 
 exe:
-	cd src; $(MAKE) exe
+	#cd src; $(MAKE) exe
+	#cd src; $(MAKE) bin
+	cd src; $(MAKE)
 
 zip:
 	cd src; $(MAKE) zip
@@ -31,13 +34,15 @@ name_ver := $(NAME)-$(version)
 changelogversion := $(shell sed -e '1 s,^\#* *\([0-9.]*\).*,\1,' -e t -e d wiki/Changelog.md)
 
 ver:
-	test $(version) = $(changelogversion)
+	echo checking same version in changelog and source
+	test "$(version)" = "$(changelogversion)"
 
 DIST := release
 TARUSER := --owner=root --group=root --owner=mintty --group=cygwin
 
 arch_files := Makefile COPYING LICENSE* INSTALL VERSION
 arch_files += src/Makefile src/*.c src/*.h src/*.rc src/*.mft
+arch_files += src/combined.t src/rgb.t
 arch_files += cygwin/*.cygport cygwin/README* cygwin/setup.hint
 arch_files += docs/*.1 docs/*.html icon/*
 arch_files += wiki/*
@@ -86,4 +91,19 @@ $(DIST)/$(name_ver)-$(REL)-src.tar.xz: $(DIST)/$(name_ver)-src.tar.bz2
 
 upload:
 	REL=$(REL) cygwin/upload.sftp
+
+announcement=cygwin/announcement.$(version)
+
+ann:	announcement
+announcement:
+	echo To: cygwin-announce@cygwin.com > $(announcement)
+	echo Subject: Updated: mintty $(version) >> $(announcement)
+	echo >> $(announcement)
+	echo I have uploaded mintty $(version) with the following changes: >> $(announcement)
+	sed -n -e 1d -e "/^#/ q" -e p wiki/Changelog.md >> $(announcement)
+	echo The homepage is at http://mintty.github.io/ >> $(announcement)
+	echo It also links to the issue tracker. >> $(announcement)
+	echo  >> $(announcement)
+	echo ------ >> $(announcement)
+	echo Thomas >> $(announcement)
 

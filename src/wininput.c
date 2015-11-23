@@ -3,6 +3,7 @@
 // Licensed under the terms of the GNU General Public License v3 or later.
 
 #include "winpriv.h"
+#include "winsearch.h"
 
 #include "charset.h"
 #include "child.h"
@@ -13,6 +14,10 @@
 #include <termios.h>
 
 static HMENU menu, sysmenu;
+static bool alt_F2_pending = false;
+static uint alt_F2_modifier = 0;
+static bool alt_F2_home = false;
+static int alt_F2_monix = 0, alt_F2_moniy = 0;
 
 void
 win_update_menus(void)
@@ -46,6 +51,11 @@ win_update_menus(void)
   ModifyMenu(
     menu, IDM_PASTE, paste_enabled, IDM_PASTE,
     clip ? "&Paste\tShift+Ins" : ct_sh ? "&Paste\tCtrl+Shift+V" : "&Paste"
+  );
+
+  ModifyMenu(
+    menu, IDM_SEARCH, 0, IDM_SEARCH,
+    alt_fn ? "S&earch\tAlt+F3" : ct_sh ? "S&earch\tCtrl+Shift+H" : "S&earch"
   );
 
   ModifyMenu(
@@ -91,6 +101,7 @@ win_init_menus(void)
   AppendMenu(menu, MF_ENABLED, IDM_PASTE, 0);
   AppendMenu(menu, MF_ENABLED, IDM_SELALL, "Select &All");
   AppendMenu(menu, MF_SEPARATOR, 0, 0);
+  AppendMenu(menu, MF_ENABLED, IDM_SEARCH, 0);
   AppendMenu(menu, MF_ENABLED, IDM_RESET, 0);
   AppendMenu(menu, MF_SEPARATOR, 0, 0);
   AppendMenu(menu, MF_ENABLED | MF_UNCHECKED, IDM_DEFSIZE_ZOOM, 0);
@@ -218,6 +229,8 @@ win_mouse_click(mouse_button b, LPARAM lp)
       p.x != last_click_pos.x || p.y != last_click_pos.y ||
       t - last_time > GetDoubleClickTime() || ++count > 3)
     count = 1;
+
+  SetFocus(wnd);  // in case focus was in search bar
   term_mouse_click(b, mods, p, count);
   last_pos = (pos){INT_MIN, INT_MIN};
   last_click_pos = p;
@@ -269,15 +282,47 @@ win_mouse_wheel(WPARAM wp, LPARAM lp)
 /* Keyboard handling */
 
 static void
+send_syscommand2(WPARAM cmd, LPARAM p)
+{
+  SendMessage(wnd, WM_SYSCOMMAND, cmd, p);
+}
+
+static void
 send_syscommand(WPARAM cmd)
 {
   SendMessage(wnd, WM_SYSCOMMAND, cmd, ' ');
 }
 
+#define dont_debug_virtual_key_codes
+
+#ifdef debug_virtual_key_codes
+static struct {
+  uint vk_;
+  char * vk_name;
+} vk_names[] = {
+#include "vk_names.t"
+};
+
+static string
+vk_name(uint key)
+{
+  for (uint i = 0; i < lengthof(vk_names); i++)
+    if (key == vk_names[i].vk_)
+      return vk_names[i].vk_name;
+  static char vk_name[3];
+  sprintf(vk_name, "%02X", key & 0xFF);
+  return vk_name;
+}
+#endif
+
 bool
 win_key_down(WPARAM wp, LPARAM lp)
 {
   uint key = wp;
+
+#ifdef debug_virtual_key_codes
+  printf("win_key_down %s\n", vk_name(key));
+#endif
 
   if (key == VK_PROCESSKEY) {
     TranslateMessage(
@@ -334,7 +379,7 @@ win_key_down(WPARAM wp, LPARAM lp)
     alt_state = ALT_CANCELLED;
 
   // Context and window menus
-  if (key == VK_APPS) {
+  if (key == VK_APPS && (!cfg.key_menu || !*cfg.key_menu)) {
     if (shift)
       send_syscommand(SC_KEYMENU);
     else {
@@ -353,7 +398,27 @@ win_key_down(WPARAM wp, LPARAM lp)
   // Exit when pressing Enter or Escape while holding the window open after
   // the child process has died.
   if ((key == VK_RETURN || key == VK_ESCAPE) && !mods && !child_is_alive())
-    exit(0);
+    exit_mintty();
+
+  if (alt_F2_pending) {
+    if (!extended) {  // only accept numeric keypad
+      alt_F2_modifier = key;
+      switch (key) {
+        when VK_HOME : alt_F2_monix--; alt_F2_moniy--;
+        when VK_UP   : alt_F2_moniy--;
+        when VK_PRIOR: alt_F2_monix++; alt_F2_moniy--;
+        when VK_LEFT : alt_F2_monix--;
+        when VK_CLEAR: alt_F2_monix = 0; alt_F2_moniy = 0; alt_F2_home = true;
+        when VK_RIGHT: alt_F2_monix++;
+        when VK_END  : alt_F2_monix--; alt_F2_moniy++;
+        when VK_DOWN : alt_F2_moniy++;
+        when VK_NEXT : alt_F2_monix++; alt_F2_moniy++;
+        when VK_INSERT or VK_DELETE:
+                       alt_F2_monix = 0; alt_F2_moniy = 0; alt_F2_home = false;
+      }
+    }
+    return 1;
+  }
 
   if (!term.shortcut_override) {
 
@@ -379,25 +444,16 @@ win_key_down(WPARAM wp, LPARAM lp)
       }
     }
 
-    // Font zooming
-    if (cfg.zoom_shortcuts && (mods & ~MDK_SHIFT) == MDK_CTRL) {
-      int zoom;
-      switch (key) {
-        when VK_OEM_PLUS or VK_ADD:       zoom = 1;
-        when VK_OEM_MINUS or VK_SUBTRACT: zoom = -1;
-        when '0' or VK_NUMPAD0:           zoom = 0;
-        otherwise: goto not_zoom;
-      }
-      win_zoom_font(zoom, mods & MDK_SHIFT);
-      return 1;
-      not_zoom:;
-    }
-
     // Alt+Fn shortcuts
     if (cfg.alt_fn_shortcuts && alt && VK_F1 <= key && key <= VK_F24) {
       if (!ctrl) {
         switch (key) {
-          when VK_F2:  send_syscommand(IDM_NEW);
+          when VK_F2:
+            // send_syscommand(IDM_NEW);
+            alt_F2_modifier = 0;
+            alt_F2_home = false; alt_F2_monix = 0; alt_F2_moniy = 0;
+            alt_F2_pending = true;
+          when VK_F3:  send_syscommand(IDM_SEARCH);
           when VK_F4:  send_syscommand(SC_CLOSE);
           when VK_F8:  send_syscommand(IDM_RESET);
           when VK_F10: send_syscommand(IDM_DEFSIZE_ZOOM);
@@ -420,6 +476,7 @@ win_key_down(WPARAM wp, LPARAM lp)
         when 'D': send_syscommand(IDM_DEFSIZE);
         when 'F': send_syscommand(IDM_FULLSCREEN);
         when 'S': send_syscommand(IDM_FLIPSCREEN);
+        when 'H': send_syscommand(IDM_SEARCH);
       }
       return 1;
     }
@@ -446,6 +503,58 @@ win_key_down(WPARAM wp, LPARAM lp)
         not_scroll:;
       }
     }
+
+    // Font zooming
+    if (cfg.zoom_shortcuts && (mods & ~MDK_SHIFT) == MDK_CTRL) {
+      int zoom;
+      switch (key) {
+        // numeric keypad keys:
+        // -- handle these ahead, i.e. here
+        when VK_SUBTRACT:  zoom = -1;
+        when VK_ADD:       zoom = 1;
+        when VK_NUMPAD0:   zoom = 0;
+          // Shift+VK_NUMPAD0 would be VK_INSERT but don't mangle that!
+        // normal keys:
+        // -- handle these in the course of layout() and other checking,
+        // -- see below
+        //when VK_OEM_MINUS: zoom = -1; mods &= ~MDK_SHIFT;
+        //when VK_OEM_PLUS:  zoom = 1; mods &= ~MDK_SHIFT;
+        //when '0':          zoom = 0;
+        otherwise: goto not_zoom;
+      }
+      win_zoom_font(zoom, mods & MDK_SHIFT);
+      return 1;
+      not_zoom:;
+    }
+  }
+
+  bool zoom_hotkey(void) {
+    if (!term.shortcut_override && cfg.zoom_shortcuts
+        && (mods & ~MDK_SHIFT) == MDK_CTRL) {
+      int zoom;
+      switch (key) {
+        // numeric keypad keys:
+        // -- handle these ahead, see above
+        //when VK_SUBTRACT:  zoom = -1;
+        //when VK_ADD:       zoom = 1;
+        //when VK_NUMPAD0:   zoom = 0;
+          // Shift+VK_NUMPAD0 would be VK_INSERT but don't mangle that!
+        // normal keys:
+        // -- handle these in the course of layout() and other checking,
+        // -- so handle the case that something is assigned to them
+        // -- e.g. Ctrl+Shift+- -> Ctrl+_
+        // -- or even a custom Ctrl+- mapping
+        // depending on keyboard layout, these may already be shifted!
+        // thus better ignore the shift state, at least for -/+
+        when VK_OEM_MINUS: zoom = -1; mods &= ~MDK_SHIFT;
+        when VK_OEM_PLUS:  zoom = 1; mods &= ~MDK_SHIFT;
+        when '0':          zoom = 0;
+        otherwise: return 0;
+      }
+      win_zoom_font(zoom, mods & MDK_SHIFT);
+      return 1;
+    }
+    return 0;
   }
 
   // Keycode buffers
@@ -528,10 +637,19 @@ win_key_down(WPARAM wp, LPARAM lp)
       mods ? mod_csi(code) : term.app_cursor_keys ? ss3(code) : csi(code);
   }
 
+static struct {
+  unsigned int combined;
+  unsigned int base;
+  unsigned int spacing;
+} comb_subst[] = {
+#include "combined.t"
+};
+
   // Keyboard layout
   bool layout(void) {
     // ToUnicode returns up to 4 wchars according to
-    // http://blogs.msdn.com/b/michkap/archive/2006/03/24/559169.aspx.
+    // http://blogs.msdn.com/b/michkap/archive/2006/03/24/559169.aspx
+    // https://web.archive.org/web/20120103012712/http://blogs.msdn.com/b/michkap/archive/2006/03/24/559169.aspx
     wchar wbuf[4];
     int wlen = ToUnicode(key, scancode, kbd, wbuf, lengthof(wbuf), 0);
     if (!wlen)     // Unassigned.
@@ -541,9 +659,33 @@ win_key_down(WPARAM wp, LPARAM lp)
 
     esc_if(alt);
 
+    // Substitute accent compositions not supported by Windows
+    if (wlen == 2)
+      for (unsigned int i = 0; i < lengthof(comb_subst); i++)
+        if (comb_subst[i].spacing == wbuf[0] && comb_subst[i].base == wbuf[1]
+            && comb_subst[i].combined < 0xFFFF  // -> wchar/UTF-16: BMP only
+           ) {
+          wchar wtmp = comb_subst[i].combined;
+          short mblen = cs_wcntombn(buf + len, &wtmp, lengthof(buf) - len, 1);
+          // short to recognise 0xFFFD as negative (WideCharToMultiByte...?)
+          if (mblen > 0) {
+            wbuf[0] = comb_subst[i].combined;
+            wlen = 1;
+          }
+          break;
+        }
+
     // Check that the keycode can be converted to the current charset
     // before returning success.
     int mblen = cs_wcntombn(buf + len, wbuf, lengthof(buf) - len, wlen);
+#ifdef debug_ToUnicode
+    printf("wlen %d:", wlen);
+    for (int i = 0; i < wlen; i ++) printf(" %04X", wbuf[i] & 0xFFFF);
+    printf("\n");
+    printf("mblen %d:", mblen);
+    for (int i = 0; i < mblen; i ++) printf(" %02X", buf[i] & 0xFF);
+    printf("\n");
+#endif
     bool ok = mblen > 0;
     len = ok ? len + mblen : 0;
     return ok;
@@ -623,8 +765,24 @@ win_key_down(WPARAM wp, LPARAM lp)
   }
 
   bool ctrl_key(void) {
+    bool try_appctrl(wchar wc) {
+      switch (wc) {
+        when '@' or '[' ... '_' or 'a' ... 'z':
+          if (term.app_control & (1 << (wc & 0x1F))) {
+            mods = ctrl * MDK_CTRL;
+            other_code((wc & 0x1F) + '@');
+            return true;
+          }
+      }
+      return false;
+    }
+
     bool try_key(void) {
-      wchar wc = undead_keycode();
+      wchar wc = undead_keycode();  // should we fold that out into ctrl_key?
+
+      if (try_appctrl(wc))
+        return true;
+
       char c;
       switch (wc) {
         when '@' or '[' ... '_' or 'a' ... 'z': c = CTRL(wc);
@@ -704,15 +862,30 @@ win_key_down(WPARAM wp, LPARAM lp)
       ? ss3('[')
       : ctrl_ch(term.escape_sends_fs ? CTRL('\\') : CTRL('['));
     when VK_PAUSE:
-      if (cfg.pause_string)
-        strcode(cfg.pause_string);
+      if (cfg.key_pause)
+        strcode(cfg.key_pause);
       else
         ctrl_ch(ctrl & !extended ? CTRL('\\') : CTRL(']'));
     when VK_CANCEL:
-      if (cfg.break_string)
-        strcode(cfg.break_string);
+      if (cfg.key_break)
+        strcode(cfg.key_break);
       else
         ctrl_ch(CTRL('\\'));
+    when VK_SNAPSHOT:
+      if (cfg.key_prtscreen)
+        strcode(cfg.key_prtscreen);
+      else if (!layout())
+        return false;
+    when VK_APPS:
+      if (cfg.key_menu)
+        strcode(cfg.key_menu);
+      else if (!layout())
+        return false;
+    when VK_SCROLL:
+      if (cfg.key_scrlock)
+        strcode(cfg.key_scrlock);
+      else if (!layout())
+        return false;
     when VK_F1 ... VK_F24:
       if (term.vt220_keys && ctrl && VK_F3 <= key && key <= VK_F10)
         key += 10, mods &= ~MDK_CTRL;
@@ -758,13 +931,16 @@ win_key_down(WPARAM wp, LPARAM lp)
       else if (char_key());
       else if (term.modify_other_keys <= 1 && ctrl_key());
       else if (term.modify_other_keys) modify_other_key();
+      else if (zoom_hotkey());
       else if (key <= '9') app_pad_code(key);
       else if (VK_OEM_PLUS <= key && key <= VK_OEM_PERIOD)
         app_pad_code(key - VK_OEM_PLUS + '+');
     when VK_PACKET:
-      layout();
+      if (!layout())
+        return false;
     otherwise:
-      return 0;
+      if (!layout())
+        return false;
   }
 
   hide_mouse();
@@ -781,7 +957,47 @@ win_key_down(WPARAM wp, LPARAM lp)
 bool
 win_key_up(WPARAM wp, LPARAM unused(lp))
 {
+#ifdef debug_virtual_key_codes
+  printf("  win_key_up %s\n", vk_name((uint)wp));
+#endif
+
   win_update_mouse();
+
+  if (alt_F2_pending) {
+    if ((uint)wp == VK_F2) {
+      alt_F2_pending = false;
+
+      // Calculate heuristic approximation of selected monitor position
+      int x, y;
+      MONITORINFO mi;
+      search_monitors(&x, &y, 0, alt_F2_home, &mi);
+      RECT r = mi.rcMonitor;
+      int refx, refy;
+      if (alt_F2_monix < 0)
+        refx = r.left + 10;
+      else if (alt_F2_monix > 0)
+        refx = r.right - 10;
+      else
+        refx = (r.left + r.right) / 2;
+      if (alt_F2_moniy < 0)
+        refy = r.top + 10;
+      else if (alt_F2_monix > 0)
+        refy = r.bottom - 10;
+      else
+        refy = (r.top + r.bottom) / 2;
+      POINT pt;
+      pt.x = refx + alt_F2_monix * x;
+      pt.y = refy + alt_F2_moniy * y;
+      // Find monitor over or nearest to point
+      HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+      int moni = search_monitors(&x, &y, mon, true, 0);
+
+#ifdef debug_multi_monitors
+      printf("NEW @ %d,%d @ monitor %d\n", pt.x, pt.y, moni);
+#endif
+      send_syscommand2(IDM_NEW_MONI, ' ' + moni);
+    }
+  }
 
   if (wp != VK_MENU)
     return false;

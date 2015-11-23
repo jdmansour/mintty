@@ -94,17 +94,17 @@ insert_char(int n)
 {
   int dir = (n < 0 ? -1 : +1);
   int m;
-  termline *line;
   term_cursor *curs = &term.curs;
+  termline *line = term.lines[curs->y];
+  int cols = min(line->cols, line->size);
 
   n = (n < 0 ? -n : n);
-  if (n > term.cols - curs->x)
-    n = term.cols - curs->x;
-  m = term.cols - curs->x - n;
+  if (n > cols - curs->x)
+    n = cols - curs->x;
+  m = cols - curs->x - n;
   term_check_boundary(curs->x, curs->y);
   if (dir < 0)
     term_check_boundary(curs->x + n, curs->y);
-  line = term.lines[curs->y];
   if (dir < 0) {
     for (int j = 0; j < m; j++)
       move_termchar(line, line->chars + curs->x + j,
@@ -625,6 +625,11 @@ set_modes(bool state)
           term.wheel_reporting = state;
         when 7787:       /* 'W': Application mousewheel mode */
           term.app_wheel = state;
+        /* Application control key modes */
+        when 77000 ... 77031: {
+          int ctrl = arg - 77000;
+          term.app_control = (term.app_control & ~(1 << ctrl)) | (state << ctrl);
+        }
       }
     }
     else {
@@ -669,19 +674,11 @@ do_winop(void)
       // Ps = 9 ; 3  -> Maximize window horizontally.
       if (arg1 == 2) {
         // maximize window vertically
-#ifdef not_good
-        int cols = term.cols;
-        win_maximise(1);
-        win_set_chars(term.rows, cols);
-#endif
+        win_set_geom(0, -1, 0, -1);
       }
       else if (arg1 == 3) {
         // maximize window horizontally
-#ifdef not_good
-        int rows = term.rows;
-        win_maximise(1);
-        win_set_chars(rows, term.cols);
-#endif
+        win_set_geom(-1, 0, -1, 0);
       }
       else
         win_maximise(arg1);
@@ -725,6 +722,10 @@ do_csi(uchar c)
 {
   term_cursor *curs = &term.curs;
   int arg0 = term.csi_argv[0], arg1 = term.csi_argv[1];
+  if (arg0 < 0)
+    arg0 = 0;
+  if (arg1 < 0)
+    arg1 = 0;
   int arg0_def1 = arg0 ?: 1;  // first arg with default 1
   switch (CPAIR(term.esc_mod, c)) {
     when 'A':        /* CUU: move up N lines */
@@ -745,13 +746,13 @@ do_csi(uchar c)
       move(0, curs->y + arg0_def1, 1);
     when 'F':        /* CPL: move up N lines and CR */
       move(0, curs->y - arg0_def1, 1);
-    when 'G' or '`':  /* CHA or HPA: set horizontal posn */
+    when 'G' or '`':  /* CHA or HPA: set horizontal position */
       move(arg0_def1 - 1, curs->y, 0);
-    when 'd':        /* VPA: set vertical posn */
+    when 'd':        /* VPA: set vertical position */
       move(curs->x,
            (curs->origin ? term.marg_top : 0) + arg0_def1 - 1,
            curs->origin ? 2 : 0);
-    when 'H' or 'f':  /* CUP or HVP: set horz and vert posns at once */
+    when 'H' or 'f':  /* CUP or HVP: set horiz. and vert. positions at once */
       move((arg1 ?: 1) - 1,
            (curs->origin ? term.marg_top : 0) + arg0_def1 - 1,
            curs->origin ? 2 : 0);
@@ -867,13 +868,16 @@ do_csi(uchar c)
       win_set_chars(term.rows, arg0 ?: cfg.cols);
       term.selected = false;
     when 'X': {      /* ECH: write N spaces w/o moving cursor */
-      int n = min(arg0_def1, term.cols - curs->x);
-      int p = curs->x;
-      term_check_boundary(curs->x, curs->y);
-      term_check_boundary(curs->x + n, curs->y);
       termline *line = term.lines[curs->y];
-      while (n--)
-        line->chars[p++] = term.erase_char;
+      int cols = min(line->cols, line->size);
+      int n = min(arg0_def1, cols - curs->x);
+      if (n > 0) {
+        int p = curs->x;
+        term_check_boundary(curs->x, curs->y);
+        term_check_boundary(curs->x + n, curs->y);
+        while (n--)
+          line->chars[p++] = term.erase_char;
+      }
     }
     when 'x':        /* DECREQTPARM: report terminal characteristics */
       child_printf("\e[%c;1;1;112;112;1;0x", '2' + arg0);
@@ -976,19 +980,39 @@ do_dcs(void)
 }
 
 static void
-do_colour_osc(uint i)
+do_colour_osc(bool has_index_arg, uint i, bool reset)
 {
   char *s = term.cmd_buf;
-  bool has_index_arg = !i;
   if (has_index_arg) {
+    int osc = i;
     int len = 0;
     sscanf(s, "%u;%n", &i, &len);
-    if (!len || i >= COLOUR_NUM)
+    if ((reset ? len != 0 : len == 0) || i >= COLOUR_NUM)
       return;
     s += len;
+    if (osc % 100 == 5) {
+      if (i == 0)
+        i = BOLD_FG_COLOUR_I;
+        // should we also flag that bold colour has been set explicitly 
+        // so it isn't overridden when setting foreground colour?
+#ifdef other_color_substitutes
+      else if (i == 1)
+        i = UNDERLINE_FG_COLOUR_I;
+      else if (i == 2)
+        i = BLINK_FG_COLOUR_I;
+      else if (i == 3)
+        i = REVERSE_FG_COLOUR_I;
+      else if (i == 4)
+        i = ITALIC_FG_COLOUR_I;
+#endif
+      else
+        return;
+    }
   }
   colour c;
-  if (!strcmp(s, "?")) {
+  if (reset)
+    win_set_colour(i, (colour)-1);
+  else if (!strcmp(s, "?")) {
     child_printf("\e]%u;", term.cmd_num);
     if (has_index_arg)
       child_printf("%u;", i);
@@ -1011,10 +1035,13 @@ do_cmd(void)
   switch (term.cmd_num) {
     when -1: do_dcs();
     when 0 or 2: win_set_title(s);  // ignore icon title
-    when 4:  do_colour_osc(0);
-    when 10: do_colour_osc(FG_COLOUR_I);
-    when 11: do_colour_osc(BG_COLOUR_I);
-    when 12: do_colour_osc(CURSOR_COLOUR_I);
+    when 4:   do_colour_osc(true, 4, false);
+    when 5:   do_colour_osc(true, 5, false);
+    when 104: do_colour_osc(true, 4, true);
+    when 105: do_colour_osc(true, 5, true);
+    when 10:  do_colour_osc(false, FG_COLOUR_I, false);
+    when 11:  do_colour_osc(false, BG_COLOUR_I, false);
+    when 12:  do_colour_osc(false, CURSOR_COLOUR_I, false);
     when 701:  // Set/get locale (from urxvt).
       if (!strcmp(s, "?"))
         child_printf("\e]701;%s\e\\", cs_get_locale());
@@ -1156,7 +1183,6 @@ term_write(const char *buf, uint len)
 
     switch (term.state) {
       when NORMAL: {
-
         wchar wc;
 
         if (term.curs.oem_acs && !memchr("\e\n\r\b", c, 4)) {
@@ -1263,6 +1289,8 @@ term_write(const char *buf, uint len)
           uint i = term.csi_argc - 1;
           if (i < lengthof(term.csi_argv))
             term.csi_argv[i] = 10 * term.csi_argv[i] + c - '0';
+            if ((int)term.csi_argv[i] < 0)
+              term.csi_argv[i] = INT_MAX;  // capture overflow
             term.csi_argv_defined[i] = 1;
         }
         else if (c < 0x40)
@@ -1296,6 +1324,8 @@ term_write(const char *buf, uint len)
         switch (c) {
           when '0' ... '9':  /* OSC command number */
             term.cmd_num = term.cmd_num * 10 + c - '0';
+            if (term.cmd_num < 0)
+              term.cmd_num = -99;  // prevent wrong valid param
           when ';':
             term.state = CMD_STRING;
           when '\a' or '\n' or '\r':
@@ -1348,6 +1378,7 @@ term_write(const char *buf, uint len)
         }
     }
   }
+  term_schedule_search_partial_update();
   win_schedule_update();
   if (term.printing) {
     printer_write(term.printbuf, term.printbuf_pos);

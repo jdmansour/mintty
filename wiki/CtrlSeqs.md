@@ -2,11 +2,21 @@
 
 ## Introduction ##
 
-Mintty's terminal emulation is aimed at compatibility with **[xterm](http://invisible-island.net/xterm/xterm.html)**. Most of the xterm control sequences documented at http://invisible-island.net/xterm/ctlseqs/ctlseqs.html are supported. Please [report as bugs](http://code.google.com/p/mintty/issues) any incompatibilities or unimplemented sequences that would be useful.
+Mintty's terminal emulation is aimed at compatibility with 
+**[xterm](http://invisible-island.net/xterm/xterm.html)**. 
+Most of the xterm control sequences documented at 
+http://invisible-island.net/xterm/ctlseqs/ctlseqs.html are supported. 
+Please [report as bugs](https://github.com/mintty/mintty/issues) 
+any incompatibilities or unimplemented sequences that would be useful.
 
-Some sequences that were introduced by other terminals such as the [Linux console](http://www.kernel.org/doc/man-pages/online/pages/man4/console_codes.4.html), and that aren't available in xterm, are also supported.
+Some sequences that were introduced by other terminals such as the 
+[Linux console](http://www.kernel.org/doc/man-pages/online/pages/man4/console_codes.4.html), 
+and that aren't available in xterm, are also supported.
 
-This page only lists control sequences that are specific to mintty. [Caret notation](http://en.wikipedia.org/wiki/Caret_notation) is used to show control characters. The full details of all supported control sequences are only available in the [source code](http://code.google.com/p/mintty/source/browse/trunk/termout.c).
+This page only lists control sequences that are specific to mintty. 
+[Caret notation](http://en.wikipedia.org/wiki/Caret_notation) is used to show control characters. 
+The full details of all supported control sequences are only available in the 
+[source code](https://github.com/mintty/mintty/blob/master/src/termout.c).
 
 
 ## Escape keycode ##
@@ -26,6 +36,35 @@ When application escape key mode is off, the escape key can be be configured to 
 |:--------------|:------------|
 | `^[[?7728l`   | `^[`        |
 | `^[[?7728h`   | `^\`        |
+
+
+## Control key codes ##
+
+Application control key mode can be configured per control key.
+It facilitates more distinction between different keys, as well as 
+usage of Ctrl+[ in various applications that would normally handle 
+the ESC character as a generic key code prefix.
+Possible distinctions:
+  * Esc key and Ctrl+[ key
+  * Tab character and Ctrl+I key
+  * NUL character sent by Ctrl+space and NUL key code sent by Ctrl+@
+
+As a generic feature, this configuration is accepted for all control 
+characters. Generated key codes are similar to those sent in the xterm 
+modifyOtherKeys mode, but normalized to a contiguous range of codes using 
+capital ASCII character codes, and indicating the control modifier only.
+Settings can be combined in a common sequence like `^[[?77009;77027h`.
+The respective setting is cleared with a corresponding sequence ending with `l`.
+
+| **sequence**  | **input** | **key code** |
+|:--------------|:----------|:-------------|
+| `^[[?77000h`  | Ctrl+@    | `^[[64;5u`   |
+| ...           |           |              |
+| `^[[?77009h`  | Ctrl+I    | `^[[73;5u`   |
+| ...           |           |              |
+| `^[[?77027h`  | Ctrl+[    | `^[[91;5u`   |
+| ...           |           |              |
+| `^[[?77031h`  | Ctrl+_    | `^[[95;5u`   |
 
 
 ## Scrollbar hiding ##

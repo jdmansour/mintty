@@ -4,7 +4,9 @@
 // Licensed under the terms of the GNU General Public License v3 or later.
 
 #define dont_debug_resize
+
 #include "winpriv.h"
+#include "winsearch.h"
 
 #include "term.h"
 #include "appinfo.h"
@@ -18,23 +20,44 @@
 
 #include <sys/cygwin.h>
 
+#if CYGWIN_VERSION_DLL_MAJOR >= 1007
+#include <propsys.h>
+#include <propkey.h>
+#endif
+
+
 HINSTANCE inst;
 HWND wnd;
 HIMC imc;
 
-bool win_is_full_screen;
-
 static char **main_argv;
 static int main_argc;
 static ATOM class_atom;
+static bool invoked_from_shortcut = false;
+static bool invoked_with_appid = false;
 
-static int extra_width, extra_height;
-static bool fullscr_on_max;
+static int extra_width, extra_height, norm_extra_width, norm_extra_height;
+
+// State
+bool win_is_fullscreen;
+static bool go_fullscr_on_max;
 static bool resizing;
-static int zoom_token = 0;
+static int zoom_token = 0;  // for heuristic handling of Shift zoom (#467, #476)
+
+// Options
 static bool title_settable = true;
 static string border_style = 0;
+static string report_geom = 0;
+static int monitor = 0;
 static bool center = false;
+static bool right = false;
+static bool bottom = false;
+static bool left = false;
+static bool top = false;
+static bool maxwidth = false;
+static bool maxheight = false;
+static bool store_taskbar_properties = false;
+static bool prevent_pinning = false;
 
 static HBITMAP caretbm;
 
@@ -46,6 +69,10 @@ typedef struct {
   int cyTopHeight;
   int cyBottomHeight;
 } MARGINS;
+
+#else
+
+#include <uxtheme.h>
 
 #endif
 
@@ -167,6 +194,53 @@ load_dwm_funcs(void)
   }
 }
 
+#define dont_debug_dpi
+
+static bool per_monitor_dpi_aware = false;
+
+#define WM_DPICHANGED 0x02E0
+const int Process_System_DPI_Aware = 1;
+const int Process_Per_Monitor_DPI_Aware  = 2;
+const int MDT_Effective_DPI = 0;
+static HRESULT (WINAPI * pGetProcessDpiAwareness)(HANDLE hprocess, int * value) = 0;
+static HRESULT (WINAPI * pSetProcessDpiAwareness)(int value) = 0;
+
+static void
+load_shcore_funcs(void)
+{
+  HMODULE shc = load_sys_library("shcore.dll");
+#ifdef debug_dpi
+  printf("load_shcore_funcs shc %d\n", !!shc);
+#endif
+  if (shc) {
+    pGetProcessDpiAwareness =
+      (void *)GetProcAddress(shc, "GetProcessDpiAwareness");
+    pSetProcessDpiAwareness =
+      (void *)GetProcAddress(shc, "SetProcessDpiAwareness");
+#ifdef debug_dpi
+      printf("SetProcessDpiAwareness %d GetProcessDpiAwareness %d\n", !!pSetProcessDpiAwareness, !!pGetProcessDpiAwareness);
+#endif
+  }
+}
+
+static bool
+set_per_monitor_dpi_aware()
+{
+  if (pSetProcessDpiAwareness && pGetProcessDpiAwareness) {
+    HRESULT hr = pSetProcessDpiAwareness(Process_Per_Monitor_DPI_Aware);
+    // E_ACCESSDENIED:
+    // The DPI awareness is already set, either by calling this API previously
+    // or through the application (.exe) manifest.
+    if (hr != E_ACCESSDENIED && !SUCCEEDED(hr))
+      pSetProcessDpiAwareness(Process_System_DPI_Aware);
+
+    int awareness = 0;
+    return SUCCEEDED(pGetProcessDpiAwareness(NULL, &awareness)) &&
+      awareness == Process_Per_Monitor_DPI_Aware;
+  }
+  return false;
+}
+
 void
 win_set_timer(void (*cb)(void), uint ticks)
 { SetTimer(wnd, (UINT_PTR)cb, ticks, null); }
@@ -268,11 +342,156 @@ win_switch(bool back, bool alternate)
 }
 
 static void
-get_monitor_info(MONITORINFO *mip)
+get_my_monitor_info(MONITORINFO *mip)
 {
   HMONITOR mon = MonitorFromWindow(wnd, MONITOR_DEFAULTTONEAREST);
   mip->cbSize = sizeof(MONITORINFO);
   GetMonitorInfo(mon, mip);
+}
+
+static void
+get_monitor_info(int moni, MONITORINFO *mip)
+{
+  mip->cbSize = sizeof(MONITORINFO);
+
+  BOOL CALLBACK
+  monitor_enum (HMONITOR hMonitor, HDC hdcMonitor, LPRECT monp, LPARAM dwData)
+  {
+    (void)hdcMonitor, (void)monp, (void)dwData;
+
+    GetMonitorInfo(hMonitor, mip);
+
+    return --moni > 0;
+  }
+
+  EnumDisplayMonitors(0, 0, monitor_enum, 0);
+}
+
+#define dont_debug_display_monitors_mockup
+#define dont_debug_display_monitors
+
+#ifdef debug_display_monitors_mockup
+# define debug_display_monitors
+static const RECT monitors[] = {
+  //(RECT){.left = 0, .top = 0, .right = 1920, .bottom = 1200},
+    //    44
+    // 3  11  2
+    //     5   6
+  {0, 0, 1920, 1200},
+  {1920, 0, 3000, 1080},
+  {-800, 200, 0, 600},
+  {0, -1080, 1920, 0},
+  {1300, 1200, 2100, 1800},
+  {2100, 1320, 2740, 1800},
+};
+static long primary_monitor = 2 - 1;
+static long current_monitor = 1 - 1;  // assumption for MonitorFromWindow
+#endif
+
+/*
+   search_monitors(&x, &y, 0, false, &moninfo)
+     returns number of monitors;
+       stores smallest width/height of all monitors
+       stores info of current monitor
+   search_monitors(&x, &y, 0, true, &moninfo)
+     returns number of monitors;
+       stores smallest width/height of all monitors
+       stores info of primary monitor
+   search_monitors(&x, &y, mon, false/true, 0)
+     returns index of given monitor (0/primary if not found)
+ */
+int
+search_monitors(int * minx, int * miny, HMONITOR lookup_mon, bool get_primary, MONITORINFO *mip)
+{
+#ifdef debug_display_monitors_mockup
+  BOOL
+  EnumDisplayMonitors(HDC hdc, LPCRECT lprcClip, MONITORENUMPROC lpfnEnum, LPARAM dwData)
+  {
+    (void)lprcClip;
+    for (unsigned long moni = 0; moni < lengthof(monitors); moni++) {
+      RECT monrect = monitors[moni];
+      HMONITOR hMonitor = (HMONITOR)(moni + 1);
+      HDC hdcMonitor = hdc;
+      //if (hdc) hdcMonitor = (HDC)...;
+      //if (hdc) monrect = intersect(hdc.rect, monrect);
+      //if (hdc) hdcMonitor.rect = intersection(hdc.rect, lprcClip, monrect);
+      if (lpfnEnum(hMonitor, hdcMonitor, &monrect, dwData) == FALSE)
+        return TRUE;
+    }
+    return TRUE;
+  }
+
+  BOOL GetMonitorInfo(HMONITOR hMonitor, LPMONITORINFO lpmi)
+  {
+    long moni = (long)hMonitor - 1;
+    lpmi->rcMonitor = monitors[moni];
+    lpmi->rcWork = monitors[moni];
+    lpmi->dwFlags = 0;
+    if (moni == primary_monitor)
+      lpmi->dwFlags = MONITORINFOF_PRIMARY;
+    return TRUE;
+  }
+
+  HMONITOR MonitorFromWindow(HWND hwnd, DWORD dwFlags)
+  {
+    (void)hwnd, (void)dwFlags;
+    return (HMONITOR)current_monitor + 1;
+  }
+#endif
+
+  int moni = 0;
+  int moni_found = 0;
+  * minx = 0;
+  * miny = 0;
+  HMONITOR refmon = 0;
+
+  BOOL CALLBACK
+  monitor_enum(HMONITOR hMonitor, HDC hdcMonitor, LPRECT monp, LPARAM dwData)
+  {
+    (void)hdcMonitor, (void)monp, (void)dwData;
+
+    moni ++;
+    if (hMonitor == lookup_mon) {
+      // looking for index of specific monitor
+      moni_found = moni;
+      return FALSE;
+    }
+
+    MONITORINFO mi;
+    mi.cbSize = sizeof(MONITORINFO);
+    GetMonitorInfo(hMonitor, &mi);
+
+    if (get_primary && (mi.dwFlags & MONITORINFOF_PRIMARY)) {
+      moni_found = moni;  // fallback to be overridden by monitor found later
+      refmon = hMonitor;
+    }
+
+    // determining smallest monitor width and height
+    RECT fr = mi.rcMonitor;
+    if (*minx == 0 || *minx > fr.right - fr.left)
+      *minx = fr.right - fr.left;
+    if (*miny == 0 || *miny > fr.bottom - fr.top)
+      *miny = fr.bottom - fr.top;
+
+#ifdef debug_display_monitors
+    if (!lookup_mon)
+      printf("Monitor %d: %d,%d...%d,%d %s\n", moni, fr.left, fr.top, fr.right, fr.bottom, mi.dwFlags & MONITORINFOF_PRIMARY ? "primary" : "");
+#endif
+
+    return TRUE;
+  }
+
+  EnumDisplayMonitors(0, 0, monitor_enum, 0);
+  if (lookup_mon) {
+    return moni_found;
+  }
+  else {
+    if (!refmon)
+      refmon = MonitorFromWindow(wnd, MONITOR_DEFAULTTONEAREST);
+    mip->cbSize = sizeof(MONITORINFO);
+    GetMonitorInfo(refmon, mip);
+    return moni;  // number of monitors
+  }
 }
 
 /*
@@ -336,7 +555,7 @@ void
 win_get_screen_chars(int *rows_p, int *cols_p)
 {
   MONITORINFO mi;
-  get_monitor_info(&mi);
+  get_my_monitor_info(&mi);
   RECT fr = mi.rcMonitor;
   *rows_p = (fr.bottom - fr.top) / font_height;
   *cols_p = (fr.right - fr.left) / font_width;
@@ -352,23 +571,159 @@ win_set_pixels(int height, int width)
                SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOZORDER);
 }
 
+bool
+win_is_glass_available(void)
+{
+  BOOL result = false;
+  if (pDwmIsCompositionEnabled)
+    pDwmIsCompositionEnabled(&result);
+  return result;
+}
+
+static bool
+win_is_blurbehind_available(void)
+{
+  // printf("win_is_blurbehind_available()\n");
+  static int available = -1;
+  if (available == -1) {
+    HMODULE ntdll = load_sys_library("ntdll.dll");
+    LONG (WINAPI* pRtlGetVersion)(RTL_OSVERSIONINFOEXW*) =
+      (void*)GetProcAddress(ntdll, "RtlGetVersion");
+
+    if (!pRtlGetVersion) {
+      // should never happen
+      available = 0;
+      return (bool) available;
+    }
+
+    RTL_OSVERSIONINFOEXW osVer;
+    memset(&osVer, 0, sizeof(RTL_OSVERSIONINFOEXW));
+    osVer.dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOEXW);
+    pRtlGetVersion(&osVer);
+    // printf("OS Version: %ld.%ld.%ld\n", osVer.dwMajorVersion, osVer.dwMinorVersion, osVer.dwBuildNumber);
+    available = osVer.dwMajorVersion >= 10;
+  }
+  return (bool) available;
+}
+
+static void
+update_glass(void)
+{
+  bool enabled =
+    cfg.transparency == TR_GLASS && !win_is_fullscreen &&
+    !(cfg.opaque_when_focused && term.has_focus);
+
+  /* printf("win_is_blurbehind_available(): %s\n", win_is_blurbehind_available() ? "true" : "false"); */
+  if (win_is_blurbehind_available() && pSetWindowCompositionAttribute) {
+    DWMACCENTPOLICY policy = { enabled ? ACCENT_ENABLE_BLURBEHIND : ACCENT_DISABLED, 0, 0, 0 };
+    WINCOMPATTR data = { WCA_ACCENT_POLICY, (WINCOMPATTR_DATA*)&policy, sizeof(WINCOMPATTR_DATA) };
+    pSetWindowCompositionAttribute(wnd, &data);
+  }
+  else if (pDwmExtendFrameIntoClientArea) {
+    /* printf("Extending frame\n"); */
+    pDwmExtendFrameIntoClientArea(wnd, &(MARGINS){enabled ? -1 : 0, 0, 0, 0});
+  }
+}
+
+/*
+ * Go full-screen. This should only be called when we are already maximised.
+ */
+static void
+make_fullscreen(void)
+{
+  win_is_fullscreen = true;
+
+ /* Remove the window furniture. */
+  LONG style = GetWindowLong(wnd, GWL_STYLE);
+  style &= ~(WS_CAPTION | WS_BORDER | WS_THICKFRAME);
+  SetWindowLong(wnd, GWL_STYLE, style);
+
+ /* The glass effect doesn't work for fullscreen windows */
+  update_glass();
+
+ /* Resize ourselves to exactly cover the nearest monitor. */
+  MONITORINFO mi;
+  get_my_monitor_info(&mi);
+  RECT fr = mi.rcMonitor;
+  SetWindowPos(wnd, HWND_TOP, fr.left, fr.top,
+               fr.right - fr.left, fr.bottom - fr.top, SWP_FRAMECHANGED);
+}
+
+/*
+ * Clear the full-screen attributes.
+ */
+static void
+clear_fullscreen(void)
+{
+  win_is_fullscreen = false;
+  update_glass();
+
+ /* Reinstate the window furniture. */
+  LONG style = GetWindowLong(wnd, GWL_STYLE);
+  if (border_style) {
+    if (strcmp (border_style, "void") != 0) {
+      style |= WS_THICKFRAME;
+    }
+  }
+  else {
+    style |= WS_CAPTION | WS_BORDER | WS_THICKFRAME;
+  }
+  SetWindowLong(wnd, GWL_STYLE, style);
+  SetWindowPos(wnd, null, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+}
+
+void
+win_set_geom(int y, int x, int height, int width)
+{
+  trace_resize(("--- win_set_geom %d %d %d %d\n", y, x, height, width));
+
+  if (win_is_fullscreen)
+    clear_fullscreen();
+
+  MONITORINFO mi;
+  get_my_monitor_info(&mi);
+  RECT ar = mi.rcWork;
+
+  int scr_height = ar.bottom - ar.top, scr_width = ar.right - ar.left;
+  int term_x, term_y, term_height, term_width;
+  win_get_pixels(&term_height, &term_width);
+  win_get_pos(&term_x, &term_y);
+
+  if (x >= 0)
+    term_x = x;
+  if (y >= 0)
+    term_y = y;
+  if (width == 0)
+    term_width = scr_width;
+  else if (width > 0)
+    term_width = width;
+  if (height == 0)
+    term_height = scr_height;
+  else if (height > 0)
+    term_height = height;
+
+  SetWindowPos(wnd, null, term_x, term_y, term_width, term_height,
+               SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOZORDER);
+}
+
 static void
 win_fix_position(void)
 {
-    RECT wr;
-    GetWindowRect(wnd, &wr);
-    MONITORINFO mi;
-    get_monitor_info(&mi);
-    RECT ar = mi.rcWork;
+  RECT wr;
+  GetWindowRect(wnd, &wr);
+  MONITORINFO mi;
+  get_my_monitor_info(&mi);
+  RECT ar = mi.rcWork;
 
-    // Correct edges. Top and left win if the window is too big.
-    wr.left -= max(0, wr.right - ar.right);
-    wr.top -= max(0, wr.bottom - ar.bottom);
-    wr.left = max(wr.left, ar.left);
-    wr.top = max(wr.top, ar.top);
+  // Correct edges. Top and left win if the window is too big.
+  wr.left -= max(0, wr.right - ar.right);
+  wr.top -= max(0, wr.bottom - ar.bottom);
+  wr.left = max(wr.left, ar.left);
+  wr.top = max(wr.top, ar.top);
 
-    SetWindowPos(wnd, 0, wr.left, wr.top, 0, 0,
-                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+  SetWindowPos(wnd, 0, wr.left, wr.top, 0, 0,
+               SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void
@@ -451,10 +806,14 @@ win_adapt_term_size(bool sync_size_with_font, bool scale_font_with_size)
   int client_height = cr.bottom - cr.top;
   extra_width = wr.right - wr.left - client_width;
   extra_height = wr.bottom - wr.top - client_height;
+  if (!win_is_fullscreen) {
+    norm_extra_width = extra_width;
+    norm_extra_height = extra_height;
+  }
   int term_width = client_width - 2 * PADDING;
   int term_height = client_height - 2 * PADDING;
 
-  if (scale_font_with_size) {
+  if (scale_font_with_size && term.cols != 0 && term.rows != 0) {
     // calc preliminary size (without font scaling), as below
     // should use term_height rather than rows; calc and store in term_resize
     int cols0 = max(1, term_width / font_width);
@@ -486,6 +845,10 @@ win_adapt_term_size(bool sync_size_with_font, bool scale_font_with_size)
       win_set_font_size(font_size1, false);
   }
 
+  if (win_search_visible()) {
+    term_height -= SEARCHBAR_HEIGHT;
+  }
+
   int cols = max(1, term_width / font_width);
   int rows = max(1, term_height / font_height);
   if (rows != term.rows || cols != term.cols) {
@@ -494,109 +857,10 @@ win_adapt_term_size(bool sync_size_with_font, bool scale_font_with_size)
     child_resize(&ws);
   }
   win_invalidate_all();
-}
 
-bool
-win_is_glass_available(void)
-{
-  BOOL result = false;
-  if (pDwmIsCompositionEnabled)
-    pDwmIsCompositionEnabled(&result);
-  return result;
-}
-
-static bool
-win_is_blurbehind_available(void)
-{
-  // printf("win_is_blurbehind_available()\n");
-  static int available = -1;
-  if (available == -1) {
-    HMODULE ntdll = load_sys_library("ntdll.dll");
-    LONG (WINAPI* pRtlGetVersion)(RTL_OSVERSIONINFOEXW*) =
-      (void*)GetProcAddress(ntdll, "RtlGetVersion");
-
-    if (!pRtlGetVersion) {
-      // should never happen
-      available = 0;
-      return (bool) available;
-    }
-
-    RTL_OSVERSIONINFOEXW osVer;
-    memset(&osVer, 0, sizeof(RTL_OSVERSIONINFOEXW));
-    osVer.dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOEXW);
-    pRtlGetVersion(&osVer);
-    // printf("OS Version: %ld.%ld.%ld\n", osVer.dwMajorVersion, osVer.dwMinorVersion, osVer.dwBuildNumber);
-    available = osVer.dwMajorVersion >= 10;
-  }
-  return (bool) available;
-}
-
-static void
-update_glass(void)
-{
-  bool enabled =
-    cfg.transparency == TR_GLASS && !win_is_fullscreen &&
-    !(cfg.opaque_when_focused && term.has_focus);
-
-  /* printf("win_is_blurbehind_available(): %s\n", win_is_blurbehind_available() ? "true" : "false"); */
-  if (win_is_blurbehind_available() && pSetWindowCompositionAttribute) {
-    DWMACCENTPOLICY policy = { enabled ? ACCENT_ENABLE_BLURBEHIND : ACCENT_DISABLED, 0, 0, 0 };
-    WINCOMPATTR data = { WCA_ACCENT_POLICY, (WINCOMPATTR_DATA*)&policy, sizeof(WINCOMPATTR_DATA) };
-    pSetWindowCompositionAttribute(wnd, &data);
-  }
-  else if (pDwmExtendFrameIntoClientArea) {
-    printf("Extending frame\n");
-    pDwmExtendFrameIntoClientArea(wnd, &(MARGINS){enabled ? -1 : 0, 0, 0, 0});
-  }
-}
-
-/*
- * Go full-screen. This should only be called when we are already
- * maximised.
- */
-static void
-make_fullscreen(void)
-{
-  win_is_fullscreen = true;
-
- /* Remove the window furniture. */
-  LONG style = GetWindowLong(wnd, GWL_STYLE);
-  style &= ~(WS_CAPTION | WS_BORDER | WS_THICKFRAME);
-  SetWindowLong(wnd, GWL_STYLE, style);
-
- /* The glass effect doesn't work for fullscreen windows */
-  update_glass();
-
- /* Resize ourselves to exactly cover the nearest monitor. */
-  MONITORINFO mi;
-  get_monitor_info(&mi);
-  RECT fr = mi.rcMonitor;
-  SetWindowPos(wnd, HWND_TOP, fr.left, fr.top,
-               fr.right - fr.left, fr.bottom - fr.top, SWP_FRAMECHANGED);
-}
-
-/*
- * Clear the full-screen attributes.
- */
-static void
-clear_fullscreen(void)
-{
-  win_is_fullscreen = false;
-  update_glass();
-
- /* Reinstate the window furniture. */
-  LONG style = GetWindowLong(wnd, GWL_STYLE);
-  if (border_style) {
-    if (strcmp (border_style, "void") != 0) {
-      style |= WS_THICKFRAME;
-    }
-  }
-  else {
-    style |= WS_CAPTION | WS_BORDER | WS_THICKFRAME;
-  }
-  SetWindowLong(wnd, GWL_STYLE, style);
-  SetWindowPos(wnd, null, 0, 0, 0, 0,
-               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+  win_update_search();
+  term_schedule_search_update();
+  win_schedule_update();
 }
 
 /*
@@ -616,7 +880,7 @@ win_maximise(int max)
   }
   else if (max) {
     if (max == 2)
-      fullscr_on_max = true;
+      go_fullscr_on_max = true;
     ShowWindow(wnd, SW_MAXIMIZE);
   }
 }
@@ -782,15 +1046,32 @@ confirm_exit(void)
 }
 
 #define dont_debug_windows_messages
+#define dont_debug_windows_mouse_messages
 
 static LRESULT CALLBACK
 win_proc(HWND wnd, UINT message, WPARAM wp, LPARAM lp)
 {
 #ifdef debug_windows_messages
-  if (message != WM_TIMER && message != WM_NCHITTEST && message != WM_MOUSEMOVE && message != WM_SETCURSOR && message != WM_NCMOUSEMOVE
-     && (message != WM_KEYDOWN || !(lp & 0x40000000))
+static struct {
+  uint wm_;
+  char * wm_name;
+} wm_names[] = {
+#include "wm_names.t"
+};
+  char * wm_name = "?";
+  for (uint i = 0; i < lengthof(wm_names); i++)
+    if (message == wm_names[i].wm_) {
+      wm_name = wm_names[i].wm_name;
+      break;
+    }
+  if ((message != WM_KEYDOWN || !(lp & 0x40000000))
+      && message != WM_TIMER && message != WM_NCHITTEST
+#ifndef debug_windows_mouse_messages
+      && message != WM_SETCURSOR
+      && message != WM_MOUSEMOVE && message != WM_NCMOUSEMOVE
+#endif
      )
-    printf ("[%d] win_proc %04X (%04X %04X)\n", (int)time(0), message, wp, (int)lp);
+    printf("[%d] win_proc %04X %s (%04X %08X)\n", (int)time(0), message, wm_name, (unsigned)wp, (unsigned)lp);
 #endif
   switch (message) {
     when WM_TIMER: {
@@ -822,13 +1103,18 @@ win_proc(HWND wnd, UINT message, WPARAM wp, LPARAM lp)
 #endif
         when IDM_FULLSCREEN or IDM_FULLSCREEN_ZOOM:
           if ((wp & ~0xF) == IDM_FULLSCREEN_ZOOM)
-            zoom_token = 1;
+            zoom_token = 4;  // override cfg.zoom_font_with_window == 0
           else
             zoom_token = -4;
           win_maximise(win_is_fullscreen ? 0 : 2);
+
+          term_schedule_search_update();
+          win_update_search();
+        when IDM_SEARCH: win_open_search();
         when IDM_FLIPSCREEN: term_flip_screen();
         when IDM_OPTIONS: win_open_config();
-        when IDM_NEW: child_fork(main_argc, main_argv);
+        when IDM_NEW: child_fork(main_argc, main_argv, 0);
+        when IDM_NEW_MONI: child_fork(main_argc, main_argv, (int)lp - ' ');
         when IDM_COPYTITLE: win_copy_title();
       }
     when WM_VSCROLL:
@@ -858,7 +1144,7 @@ win_proc(HWND wnd, UINT message, WPARAM wp, LPARAM lp)
     when WM_MOUSEWHEEL: win_mouse_wheel(wp, lp);
     when WM_INPUTLANGCHANGEREQUEST:  // catch Shift-Control-0
       if ((GetKeyState(VK_SHIFT) & 0x80) && (GetKeyState(VK_CONTROL) & 0x80))
-        if (win_key_down('0', lp))
+        if (win_key_down('0', 0x000B0001))
           return 0;
     when WM_KEYDOWN or WM_SYSKEYDOWN:
       if (win_key_down(wp, lp))
@@ -958,8 +1244,8 @@ win_proc(HWND wnd, UINT message, WPARAM wp, LPARAM lp)
       trace_resize(("# WM_SIZE (resizing %d) VK_SHIFT %02X\n", resizing, GetKeyState(VK_SHIFT)));
       if (wp == SIZE_RESTORED && win_is_fullscreen)
         clear_fullscreen();
-      else if (wp == SIZE_MAXIMIZED && fullscr_on_max) {
-        fullscr_on_max = false;
+      else if (wp == SIZE_MAXIMIZED && go_fullscr_on_max) {
+        go_fullscr_on_max = false;
         make_fullscreen();
       }
 
@@ -970,13 +1256,16 @@ win_proc(HWND wnd, UINT message, WPARAM wp, LPARAM lp)
         // - triggered by Windows shortcut (with Windows key)
         // - triggered by Ctrl+Shift+F (zoom_token < 0)
         if ((zoom_token >= 0) && !(GetKeyState(VK_LWIN) & 0x80))
-          zoom_token = 1;
+          if (zoom_token < 1)  // accept overriding zoom_token 4
+            zoom_token = 1;
 #else
         // - triggered by Windows shortcut (with Windows key)
         if (!(GetKeyState(VK_LWIN) & 0x80))
-          zoom_token = 1;
+          if (zoom_token < 1)  // accept overriding zoom_token 4
+            zoom_token = 1;
 #endif
-        bool scale_font = (zoom_token > 0) && (GetKeyState(VK_SHIFT) & 0x80);
+        bool scale_font = (cfg.zoom_font_with_window || zoom_token > 2)
+                          && (zoom_token > 0) && (GetKeyState(VK_SHIFT) & 0x80);
         win_adapt_term_size(false, scale_font);
         if (zoom_token > 0)
           zoom_token = zoom_token >> 1;
@@ -987,6 +1276,22 @@ win_proc(HWND wnd, UINT message, WPARAM wp, LPARAM lp)
     when WM_INITMENU:
       win_update_menus();
       return 0;
+    when WM_DPICHANGED:
+#ifdef debug_dpi
+      printf("WM_DPICHANGED %d\n", per_monitor_dpi_aware);
+#endif
+      if (per_monitor_dpi_aware) {
+        LPRECT r = (LPRECT) lp;
+        SetWindowPos(wnd, 0,
+          r->left, r->top, r->right - r->left, r->bottom - r->top,
+          SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+        win_adapt_term_size(false, true);
+#ifdef debug_dpi
+        printf("SM_CXVSCROLL %d\n", GetSystemMetrics(SM_CXVSCROLL));
+#endif
+        return 0;
+      }
+      break;
   }
  /*
   * Any messages we don't process completely above are passed through to
@@ -1018,27 +1323,31 @@ static const char help[] =
   "  -V, --version         Print version information and exit\n"
 ;
 
-static const char short_opts[] = "+:c:eh:i:l:o:p:s:t:T:B:uw:HV:d";
+static const char short_opts[] = "+:c:C:eh:i:l:o:p:s:t:T:B:R:uw:HVd";
 
 static const struct option
 opts[] = {
-  {"config",   required_argument, 0, 'c'},
-  {"exec",     no_argument,       0, 'e'},
-  {"hold",     required_argument, 0, 'h'},
-  {"icon",     required_argument, 0, 'i'},
-  {"log",      required_argument, 0, 'l'},
-  {"utmp",     no_argument,       0, 'u'},
-  {"option",   required_argument, 0, 'o'},
-  {"position", required_argument, 0, 'p'},
-  {"size",     required_argument, 0, 's'},
-  {"title",    required_argument, 0, 't'},
-  {"Title",    required_argument, 0, 'T'},
-  {"Border",   required_argument, 0, 'B'},
-  {"window",   required_argument, 0, 'w'},
-  {"class",    required_argument, 0, 'C'},
-  {"help",     no_argument,       0, 'H'},
-  {"version",  no_argument,       0, 'V'},
-  {"nodaemon", no_argument,       0, 'd'},
+  {"config",     required_argument, 0, 'c'},
+  {"loadconfig", required_argument, 0, 'C'},
+  {"exec",       no_argument,       0, 'e'},
+  {"hold",       required_argument, 0, 'h'},
+  {"icon",       required_argument, 0, 'i'},
+  {"log",        required_argument, 0, 'l'},
+  {"utmp",       no_argument,       0, 'u'},
+  {"option",     required_argument, 0, 'o'},
+  {"position",   required_argument, 0, 'p'},
+  {"size",       required_argument, 0, 's'},
+  {"title",      required_argument, 0, 't'},
+  {"Title",      required_argument, 0, 'T'},
+  {"Border",     required_argument, 0, 'B'},
+  {"Reportpos",  required_argument, 0, 'R'},
+  {"window",     required_argument, 0, 'w'},
+  {"class",      required_argument, 0, ''},  // short option not enabled
+  {"help",       no_argument,       0, 'H'},
+  {"version",    no_argument,       0, 'V'},
+  {"nodaemon",   no_argument,       0, 'd'},
+  {"nopin",      no_argument,       0, ''},  // short option not enabled
+  {"store-taskbar-properties", no_argument, 0, ''},  // no short option
   {0, 0, 0, 0}
 };
 
@@ -1075,6 +1384,210 @@ warn(char *format, ...)
   show_msg(stderr, msg);
 }
 
+void
+report_pos()
+{
+  if (report_geom) {
+    int x, y;
+    //win_get_pos(&x, &y);  // would not consider maximised/minimised
+    WINDOWPLACEMENT placement;
+    placement.length = sizeof(WINDOWPLACEMENT);
+    GetWindowPlacement(wnd, &placement);
+    x = placement.rcNormalPosition.left;
+    y = placement.rcNormalPosition.top;
+    int cols = term.cols;
+    int rows = term.rows;
+    cols = (placement.rcNormalPosition.right - placement.rcNormalPosition.left - norm_extra_width - 2 * PADDING) / font_width;
+    rows = (placement.rcNormalPosition.bottom - placement.rcNormalPosition.top - norm_extra_height - 2 * PADDING) / font_height;
+
+    printf("%s", main_argv[0]);
+    printf(*report_geom == 'o' ? " -o Columns=%d -o Rows=%d" : " -s %d,%d", cols, rows);
+    printf(*report_geom == 'o' ? " -o X=%d -o Y=%d" : " -p %d,%d", x, y);
+    char * winstate = 0;
+    if (win_is_fullscreen)
+      winstate = "full";
+    else if (IsZoomed(wnd))
+      winstate = "max";
+    else if (IsIconic(wnd))
+      winstate = "min";
+    if (winstate)
+      printf(*report_geom == 'o' ? " -o Window=%s" : " -w %s", winstate);
+    printf("\n");
+  }
+}
+
+void
+exit_mintty()
+{
+  report_pos();
+  exit(0);
+}
+
+static void
+configure_taskbar()
+{
+#ifdef patch_jumplist
+#include "jumplist.h"
+  // test data
+  char ** jump_list_title = {
+    "title1", "", "", "mä€", "", "", "", "", "", "", 
+  };
+  char ** jump_list_cmd = {
+    "-o Rows=15", "-o Rows=20", "", "-t mö€", "", "", "", "", "", "", 
+  };
+  // the patch offered in issue #290 does not seem to work
+  setup_jumplist(jump_list_title, jump_list_cmd);
+#endif
+
+#if CYGWIN_VERSION_DLL_MAJOR >= 1007
+  // initial patch (issue #471) contributed by Johannes Schindelin
+  const char * app_id = cfg.app_id;
+  const char * relaunch_icon = cfg.icon;
+  const char * relaunch_display_name = cfg.app_name;
+  const char * relaunch_command = cfg.app_launch_cmd;
+
+#define dont_debug_properties
+
+#ifdef two_witty_ideas_with_bad_side_effects
+#warning automatic derivation of an AppId is likely not a good idea
+  // If an icon is configured but no app_id, we can derive one from the 
+  // icon in order to enable proper taskbar grouping by common icon.
+  // However, this has an undesirable side-effect if a shortcut is 
+  // pinned (presumably getting some implicit AppID from Windows) and 
+  // instances are started from there (with a different AppID...).
+  // Disabled.
+  if (relaunch_icon && *relaunch_icon && (!app_id || !*app_id)) {
+    const char * iconbasename = strrchr(cfg.icon, '/');
+    if (iconbasename)
+      iconbasename ++;
+    else {
+      iconbasename = strrchr(cfg.icon, '\\');
+      if (iconbasename)
+        iconbasename ++;
+      else
+        iconbasename = cfg.icon;
+    }
+    char * derived_app_id = malloc(strlen(iconbasename) + 7 + 1);
+    strcpy(derived_app_id, "Mintty.");
+    strcat(derived_app_id, iconbasename);
+    app_id = derived_app_id;
+  }
+  // If app_name is configured but no app_launch_cmd, we need an app_id 
+  // to make app_name effective as taskbar title, so invent one.
+  if (relaunch_display_name && *relaunch_display_name && 
+      (!app_id || !*app_id)) {
+    app_id = "Mintty.AppID";
+  }
+#endif
+
+  // Set the app ID explicitly, as well as the relaunch command and display name
+  if (prevent_pinning || (app_id && *app_id)) {
+    HMODULE shell = load_sys_library("shell32.dll");
+    HRESULT (WINAPI *pGetPropertyStore)(HWND hwnd, REFIID riid, void **ppv) =
+      (void *)GetProcAddress(shell, "SHGetPropertyStoreForWindow");
+#ifdef debug_properties
+      printf("SHGetPropertyStoreForWindow linked %d\n", !!pGetPropertyStore);
+#endif
+    if (pGetPropertyStore) {
+      size_t size;
+      IPropertyStore *pps;
+      HRESULT hr;
+      PROPVARIANT var;
+
+      hr = pGetPropertyStore(wnd, &IID_IPropertyStore, (void **) &pps);
+#ifdef debug_properties
+      printf("IPropertyStore found %d\n", SUCCEEDED(hr));
+#endif
+      if (SUCCEEDED(hr)) {
+        // doc: https://msdn.microsoft.com/en-us/library/windows/desktop/dd378459%28v=vs.85%29.aspx
+        // def: typedef struct tagPROPVARIANT PROPVARIANT: propidl.h
+        // def: enum VARENUM (VT_*): wtypes.h
+        // def: PKEY_*: propkey.h
+        if (relaunch_command && *relaunch_command && store_taskbar_properties
+            && (size = cs_mbstowcs(0, relaunch_command, 0) + 1)) {
+          var.pwszVal = malloc(size * sizeof(wchar));
+          if (var.pwszVal) {
+#ifdef debug_properties
+            printf("AppUserModel_RelaunchCommand=%s\n", relaunch_command);
+#endif
+            cs_mbstowcs(var.pwszVal, relaunch_command, size);
+            var.vt = VT_LPWSTR;
+            pps->lpVtbl->SetValue(pps,
+                &PKEY_AppUserModel_RelaunchCommand, &var);
+          }
+        }
+        if (relaunch_display_name && *relaunch_display_name &&
+            (size = cs_mbstowcs(0, relaunch_display_name, 0) + 1)) {
+          var.pwszVal = malloc(size * sizeof(wchar));
+          if (var.pwszVal) {
+#ifdef debug_properties
+            printf("AppUserModel_RelaunchDisplayNameResource=%s\n", relaunch_display_name);
+#endif
+            cs_mbstowcs(var.pwszVal, relaunch_display_name, size);
+            var.vt = VT_LPWSTR;
+            pps->lpVtbl->SetValue(pps,
+                &PKEY_AppUserModel_RelaunchDisplayNameResource, &var);
+          }
+        }
+        if (relaunch_icon && *relaunch_icon &&
+            (size = cs_mbstowcs(0, relaunch_icon, 0) + 1)) {
+          var.pwszVal = malloc(size * sizeof(wchar));
+          if (var.pwszVal) {
+#ifdef debug_properties
+            printf("AppUserModel_RelaunchIconResource=%s\n", relaunch_icon);
+#endif
+            cs_mbstowcs(var.pwszVal, relaunch_icon, size);
+            var.vt = VT_LPWSTR;
+            pps->lpVtbl->SetValue(pps,
+                &PKEY_AppUserModel_RelaunchIconResource, &var);
+          }
+        }
+        if (prevent_pinning) {
+          var.boolVal = VARIANT_TRUE;
+#ifdef debug_properties
+          printf("AppUserModel_PreventPinning=%d\n", var.boolVal);
+#endif
+          var.vt = VT_BOOL;
+          // PreventPinning must be set before setting ID
+          pps->lpVtbl->SetValue(pps,
+              &PKEY_AppUserModel_PreventPinning, &var);
+        }
+#ifdef set_userpinned
+DEFINE_PROPERTYKEY(PKEY_AppUserModel_StartPinOption, 0x9f4c2855,0x9f79,0x4B39,0xa8,0xd0,0xe1,0xd4,0x2d,0xe1,0xd5,0xf3,12);
+#define APPUSERMODEL_STARTPINOPTION_USERPINNED 2
+#warning needs Windows 8/10 to build...
+        {
+          var.uintVal = APPUSERMODEL_STARTPINOPTION_USERPINNED;
+#ifdef debug_properties
+          printf("AppUserModel_StartPinOption=%d\n", var.uintVal);
+#endif
+          var.vt = VT_UINT;
+          pps->lpVtbl->SetValue(pps,
+              &PKEY_AppUserModel_StartPinOption, &var);
+        }
+#endif
+        if (app_id && *app_id &&
+            (size = cs_mbstowcs(0, app_id, 0) + 1)) {
+          var.pwszVal = malloc(size * sizeof(wchar));
+          if (var.pwszVal) {
+#ifdef debug_properties
+            printf("AppUserModel_ID=%s\n", app_id);
+#endif
+            cs_mbstowcs(var.pwszVal, app_id, size);
+            var.vt = VT_LPWSTR;  // VT_EMPTY should remove but has no effect
+            pps->lpVtbl->SetValue(pps,
+                &PKEY_AppUserModel_ID, &var);
+          }
+        }
+
+        pps->lpVtbl->Commit(pps);
+        pps->lpVtbl->Release(pps);
+      }
+    }
+  }
+#endif
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1100,18 +1613,14 @@ main(int argc, char *argv[])
   GetStartupInfo(&sui);
   cfg.window = sui.dwFlags & STARTF_USESHOWWINDOW ? sui.wShowWindow : SW_SHOW;
   cfg.x = cfg.y = CW_USEDEFAULT;
+  invoked_from_shortcut = sui.dwFlags & STARTF_TITLEISLINKNAME;
+  invoked_with_appid = sui.dwFlags & STARTF_TITLEISAPPID;
+  // shortcut or AppId would be found in sui.lpTitle
 
-  load_config("/etc/minttyrc");
+  load_config("/etc/minttyrc", true);
   string rc_file = asform("%s/.minttyrc", home);
-  load_config(rc_file);
+  load_config(rc_file, true);
   delete(rc_file);
-
-  if (getenv("MINTTY_ROWS")) {
-    set_arg_option("Rows", getenv("MINTTY_ROWS"));
-  }
-  if (getenv("MINTTY_COLS")) {
-    set_arg_option("Columns", getenv("MINTTY_COLS"));
-  }
 
   for (;;) {
     int opt = getopt_long(argc, argv, short_opts, opts, 0);
@@ -1119,7 +1628,8 @@ main(int argc, char *argv[])
       break;
     char *longopt = argv[optind - 1], *shortopt = (char[]){'-', optopt, 0};
     switch (opt) {
-      when 'c': load_config(optarg);
+      when 'c': load_config(optarg, true);
+      when 'C': load_config(optarg, false);
       when 'h': set_arg_option("Hold", optarg);
       when 'i': set_arg_option("Icon", optarg);
       when 'l': set_arg_option("Log", optarg);
@@ -1127,22 +1637,50 @@ main(int argc, char *argv[])
       when 'p':
         if (strcmp(optarg, "center") == 0 || strcmp(optarg, "centre") == 0)
           center = true;
-        else if (sscanf(optarg, "%i,%i%1s", &cfg.x, &cfg.y, (char[2]){}) != 2)
+        else if (strcmp(optarg, "right") == 0)
+          right = true;
+        else if (strcmp(optarg, "bottom") == 0)
+          bottom = true;
+        else if (strcmp(optarg, "left") == 0)
+          left = true;
+        else if (strcmp(optarg, "top") == 0)
+          top = true;
+        else if (sscanf(optarg, "@%i%1s", &monitor, (char[2]){}) == 1)
+          ;
+        else if (sscanf(optarg, "%i,%i%1s", &cfg.x, &cfg.y, (char[2]){}) == 2)
+          ;
+        else
           error("syntax error in position argument '%s'", optarg);
       when 's':
-        if (sscanf(optarg, "%u,%u%1s", &cfg.cols, &cfg.rows, (char[2]){}) != 2)
+        if (strcmp(optarg, "maxwidth") == 0)
+          maxwidth = true;
+        else if (strcmp(optarg, "maxheight") == 0)
+          maxheight = true;
+        else if (sscanf(optarg, "%u,%u%1s", &cfg.cols, &cfg.rows, (char[2]){}) == 2) {
+          remember_arg("Columns");
+          remember_arg("Rows");
+        }
+        else if (sscanf(optarg, "%ux%u%1s", &cfg.cols, &cfg.rows, (char[2]){}) == 2) {
+          remember_arg("Columns");
+          remember_arg("Rows");
+        }
+        else
           error("syntax error in size argument '%s'", optarg);
-        remember_arg("Columns");
-        remember_arg("Rows");
       when 't': set_arg_option("Title", optarg);
       when 'T':
         set_arg_option("Title", optarg);
         title_settable = false;
       when 'B':
         border_style = strdup (optarg);
+      when 'R':
+        report_geom = strdup (optarg);
       when 'u': cfg.utmp = true;
+      when '':
+        prevent_pinning = true;
+        store_taskbar_properties = true;
+      when '': store_taskbar_properties = true;
       when 'w': set_arg_option("Window", optarg);
-      when 'C': set_arg_option("Class", optarg);
+      when '': set_arg_option("Class", optarg);
       when 'd':
         cfg.daemonize = false;
       when 'H':
@@ -1159,19 +1697,35 @@ main(int argc, char *argv[])
     }
   }
 
+  if (getenv("MINTTY_ROWS")) {
+    set_arg_option("Rows", getenv("MINTTY_ROWS"));
+    unsetenv("MINTTY_ROWS");
+  }
+  if (getenv("MINTTY_COLS")) {
+    set_arg_option("Columns", getenv("MINTTY_COLS"));
+    unsetenv("MINTTY_COLS");
+  }
+  if (getenv("MINTTY_MONITOR")) {
+    monitor = atoi(getenv("MINTTY_MONITOR"));
+    unsetenv("MINTTY_MONITOR");
+  }
+
   finish_config();
 
   // if started from console, try to detach from caller's terminal (~daemonizing)
   // in order to not suppress signals
   // (indicated by isatty if linked with -mwindows as ttyname() is null)
   bool daemonize = cfg.daemonize && !isatty(0);
+  // disable daemonizing if started from desktop
+  if (invoked_from_shortcut)
+    daemonize = false;
   // disable daemonizing if started from ConEmu
   if (getenv("ConEmuPID"))
     daemonize = false;
   if (daemonize) {  // detach from parent process and terminal
     pid_t pid = fork();
     if (pid < 0)
-      error("could not detach from caller");
+      fprintf(stderr, "Mintty could not detach from caller, starting anyway.\n");
     if (pid > 0)
       exit(0);  // exit parent process
 
@@ -1179,6 +1733,12 @@ main(int argc, char *argv[])
   }
 
   load_dwm_funcs();  // must be called after the fork() above!
+
+  load_shcore_funcs();
+  per_monitor_dpi_aware = set_per_monitor_dpi_aware();
+#ifdef debug_dpi
+  printf("per_monitor_dpi_aware %d\n", per_monitor_dpi_aware);
+#endif
 
   // Work out what to execute.
   argv += optind;
@@ -1334,7 +1894,14 @@ main(int argc, char *argv[])
 
   RECT cr = {0, 0, term_width + 2 * PADDING, term_height + 2 * PADDING};
   RECT wr = cr;
-  AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, false);
+  LONG window_style = WS_OVERLAPPEDWINDOW;
+  if (border_style) {
+    if (strcmp (border_style, "void") == 0)
+      window_style &= ~(WS_CAPTION | WS_BORDER | WS_THICKFRAME);
+    else
+      window_style &= ~(WS_CAPTION | WS_BORDER);
+  }
+  AdjustWindowRect(&wr, window_style, false);
   int width = wr.right - wr.left;
   int height = wr.bottom - wr.top;
 
@@ -1343,6 +1910,8 @@ main(int argc, char *argv[])
 
   extra_width = width - (cr.right - cr.left);
   extra_height = height - (cr.bottom - cr.top);
+  norm_extra_width = extra_width;
+  norm_extra_height = extra_height;
 
   // Having x == CW_USEDEFAULT but not y still triggers default positioning,
   // whereas y == CW_USEDEFAULT but not x results in an invisible window,
@@ -1353,20 +1922,102 @@ main(int argc, char *argv[])
 
   int x = cfg.x;
   int y = cfg.y;
-  if (center) {
-    MONITORINFO mi;
-    get_monitor_info(&mi);
-    RECT ar = mi.rcWork;
-    x = (ar.right - width) / 2;
-    y = (ar.bottom - height) / 2;
-  }
+
+#define dont_debug_position
+#ifdef debug_position
+#define printpos(tag, x, y, mon)	printf("%s %d %d (%ld %ld %ld %ld)\n", tag, x, y, mon.left, mon.top, mon.right, mon.bottom);
+#else
+#define printpos(tag, x, y, mon)
+#endif
 
   // Create initial window.
   wnd = CreateWindowExW(cfg.scrollbar < 0 ? WS_EX_LEFTSCROLLBAR : 0,
                         wclass, wtitle,
-                        WS_OVERLAPPEDWINDOW | (cfg.scrollbar ? WS_VSCROLL : 0),
+                        window_style | (cfg.scrollbar ? WS_VSCROLL : 0),
                         x, y, width, height,
                         null, null, inst, null);
+
+  // Adapt window position (and maybe size) to special parameters
+  // also select monitor if requested
+  if (center || right || bottom || left || top || maxwidth || maxheight
+      || monitor > 0
+     ) {
+    MONITORINFO mi;
+    get_my_monitor_info(&mi);
+    RECT ar = mi.rcWork;
+    printpos ("cre", x, y, ar);
+
+    if (monitor > 0) {
+      MONITORINFO monmi;
+      get_monitor_info(monitor, &monmi);
+      RECT monar = monmi.rcWork;
+
+      if (x == (int)CW_USEDEFAULT) {
+        // Shift and scale assigned default position to selected monitor.
+        win_get_pos(&x, &y);
+        printpos ("def", x, y, ar);
+        x = monar.left + (x - ar.left) * (monar.right - monar.left) / (ar.right - ar.left);
+        y = monar.top + (y - ar.top) * (monar.bottom - monar.top) / (ar.bottom - ar.top);
+      }
+      else {
+        // Shift selected position to selected monitor.
+        x += monar.left - ar.left;
+        y += monar.top - ar.top;
+      }
+
+      ar = monar;
+      printpos ("mon", x, y, ar);
+    }
+
+    if (cfg.x == (int)CW_USEDEFAULT) {
+      if (monitor == 0)
+        win_get_pos(&x, &y);
+      if (left || right)
+        cfg.x = 0;
+      if (top || bottom)
+        cfg.y = 0;
+        printpos ("fix", x, y, ar);
+    }
+
+    if (left)
+      x = ar.left + cfg.x;
+    else if (right)
+      x = ar.right - cfg.x - width;
+    else if (center)
+      x = (ar.left + ar.right - width) / 2;
+    if (top)
+      y = ar.top + cfg.y;
+    else if (bottom)
+      y = ar.bottom - cfg.y - height;
+    else if (center)
+      y = (ar.top + ar.bottom - height) / 2;
+      printpos ("pos", x, y, ar);
+
+    if (maxwidth) {
+      x = ar.left;
+      width = ar.right - ar.left;
+    }
+    if (maxheight) {
+      y = ar.top;
+      height = ar.bottom - ar.top;
+    }
+    printpos ("fin", x, y, ar);
+
+    SetWindowPos(wnd, NULL, x, y, width, height,
+      SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+  }
+
+  if (per_monitor_dpi_aware) {
+    if (cfg.x != (int)CW_USEDEFAULT) {
+      // The first SetWindowPos actually set x and y
+      SetWindowPos(wnd, NULL, x, y, width, height,
+        SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+      // Then, we are placed the windows on the correct monitor and we can
+      // now interpret width/height in correct DPI.
+      SetWindowPos(wnd, NULL, x, y, width, height,
+        SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+    }
+  }
 
   if (border_style) {
     LONG style = GetWindowLong(wnd, GWL_STYLE);
@@ -1380,6 +2031,8 @@ main(int argc, char *argv[])
     SetWindowPos(wnd, null, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
   }
+
+  configure_taskbar();
 
   // The input method context.
   imc = ImmGetContext(wnd);
@@ -1423,8 +2076,24 @@ main(int argc, char *argv[])
   );
 
   // Finally show the window!
-  fullscr_on_max = (cfg.window == -1);
-  ShowWindow(wnd, fullscr_on_max ? SW_SHOWMAXIMIZED : cfg.window);
+  go_fullscr_on_max = (cfg.window == -1);
+  ShowWindow(wnd, go_fullscr_on_max ? SW_SHOWMAXIMIZED : cfg.window);
+  SetFocus(wnd);
+
+#ifdef debug_display_monitors_mockup
+  {
+    int x, y;
+    MONITORINFO mi;
+    int n = search_monitors(&x, &y, 0, false, &mi);
+    printf("%d monitors, smallest %dx%d, current %d,%d...%d,%d\n", n, x, y, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom);
+    n = search_monitors(&x, &y, 0, true, &mi);
+    printf("%d monitors, smallest %dx%d, primary %d,%d...%d,%d\n", n, x, y, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom);
+    n = search_monitors(&x, &y, (HMONITOR)(current_monitor + 1), false, 0);
+    printf("current monitor: %d\n", n);
+    n = search_monitors(&x, &y, (HMONITOR)(primary_monitor + 1), false, 0);
+    printf("primary monitor: %d\n", n);
+  }
+#endif
 
   // Message loop.
   for (;;) {
