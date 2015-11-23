@@ -68,6 +68,9 @@ static const wchar linedraw_chars[LDRAW_CHAR_NUM][LDRAW_CHAR_TRIES] = {
   {0x00B7, '.'},                   // 0x7E '~' Centered dot
 };
 
+#define OPAQUE_ALPHA 255
+#define MEDIUM_ALPHA 207
+
 static enum {BOLD_NONE, BOLD_SHADOW, BOLD_FONT} bold_mode;
 static enum {UND_LINE, UND_FONT} und_mode;
 static int descent;
@@ -380,35 +383,29 @@ win_paint(void)
     DeleteObject(SelectObject(dc, oldpen));
   }
 
-  /* set alpha channel */
-  for (int y=0; y<bmi.bmiHeader.biHeight; y++) {
-    BYTE *pPixel= (BYTE *) pBits + bmi.bmiHeader.biWidth * 4 * y;
-    for (int x=0; x<bmi.bmiHeader.biWidth ; x++) {
-      int alpha = 180;
-      pPixel[0] *= alpha/255.;
-      pPixel[1] *= alpha/255.;
-      pPixel[2] *= alpha/255.;
-      pPixel[3] = alpha;
-      pPixel+= 4;
+    /* set alpha channel in border region */
+    for (int y=p.rcPaint.top; y<p.rcPaint.bottom; y++) {
+      BYTE *pPixel= (BYTE *) pBits + bmi.bmiHeader.biWidth * 4 * y;
+      for (int x=p.rcPaint.left; x<p.rcPaint.right ; x++) {
+        /* dont touch text region (honor ExcludeClipRect above) */
+        if (x > PADDING && x < PADDING + font_width * term.cols &&
+            y > PADDING && y < PADDING + font_height * term.rows) {
+          continue;
+        }
+        int alpha = MEDIUM_ALPHA;
+        pPixel[0] *= alpha/255.;
+        pPixel[1] *= alpha/255.;
+        pPixel[2] *= alpha/255.;
+        pPixel[3] = alpha;
+        pPixel+= 4;
+      }
     }
   }
 
-  /* clear region */
-  HBRUSH oldbrush = SelectObject(win_dc, CreateSolidBrush(BLACK_BRUSH));
-  Rectangle(win_dc, p.rcPaint.left, p.rcPaint.top, p.rcPaint.right, p.rcPaint.bottom);
-  DeleteObject(SelectObject(win_dc, oldbrush));
+  BitBlt(win_dc, p.rcPaint.left, p.rcPaint.top,
+         p.rcPaint.right-p.rcPaint.left, p.rcPaint.bottom-p.rcPaint.top,
+         off_dc, p.rcPaint.left, p.rcPaint.top, SRCCOPY);
 
-  /* Copy offscreen bitmap to dc.  We don't want to merge the bitmap with what is
-   * already there, but replace the existing image - alpha channel included. */
-  BLENDFUNCTION ftn;
-  ftn.BlendOp = AC_SRC_OVER;
-  ftn.BlendFlags = 0;
-  ftn.SourceConstantAlpha = 255;
-  ftn.AlphaFormat = AC_SRC_ALPHA;
-  pAlphaBlend(win_dc, p.rcPaint.left, p.rcPaint.top,
-              p.rcPaint.right-p.rcPaint.left, p.rcPaint.bottom-p.rcPaint.top,
-              off_dc, p.rcPaint.left, p.rcPaint.top,
-              p.rcPaint.right-p.rcPaint.left, p.rcPaint.bottom-p.rcPaint.top, ftn);
   DeleteObject(SelectObject(off_dc, off_oldbm));
   DeleteDC(off_dc);
 
@@ -577,28 +574,24 @@ MyExtTextOutW(HDC hdc, int X, int Y, UINT fuOptions, const RECT *lprc, LPCWSTR l
     Rectangle(off_dc, 0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight);
     DeleteObject(SelectObject(off_dc, oldbrush));
   }
-  
-  int alpha = 255;
+
+  int alpha = OPAQUE_ALPHA;
   COLORREF bgcolor = GetBkColor(hdc);
-  if (bgcolor == colours[BG_COLOUR_I]) {
-    alpha = 180;
+  if (bgcolor == colours[BG_COLOUR_I] && cfg.transparency == TR_GLASS) {
+    alpha = MEDIUM_ALPHA;
   }
 
   RECT rcTranslated = {0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight};
   ExtTextOutW(off_dc, 0, 0, fuOptions, &rcTranslated, lpString, cbCount, lpDx);
 
+  // todo: make the text (foreground) completely opaque
   for (int y = 0; y < bmi.bmiHeader.biHeight; y++) {
     BYTE *pTmp = (BYTE *) pBits + bmi.bmiHeader.biWidth * 4 * y;
     for (int x = 0; x < bmi.bmiHeader.biWidth; x++) {
-      // hack hack hack
-      if (GetRValue(bgcolor) == pTmp[2] && GetGValue(bgcolor) == pTmp[1] && GetBValue(bgcolor) == pTmp[0]) {
-        pTmp[0] *= alpha/255.;
-        pTmp[1] *= alpha/255.;
-        pTmp[2] *= alpha/255.;
-        pTmp[3] = alpha;
-      } else {
-        pTmp[3] = 255;
-      }
+      pTmp[0] *= alpha/255.;
+      pTmp[1] *= alpha/255.;
+      pTmp[2] *= alpha/255.;
+      pTmp[3] = alpha;
       pTmp += 4;
     }
   }
@@ -622,19 +615,10 @@ MyExtTextOutW(HDC hdc, int X, int Y, UINT fuOptions, const RECT *lprc, LPCWSTR l
   // pDrawThemeTextEx(theme, off_dc, 0, 0, lpString, cbCount, dwFlags, &rcTranslated, &options);
   // pCloseThemeData(theme);
 
-  HBRUSH oldbrush = SelectObject(hdc, CreateSolidBrush(BLACK_BRUSH));
-  Rectangle(hdc, lprc->left, lprc->top, lprc->right, lprc->bottom);
-  DeleteObject(SelectObject(hdc, oldbrush));
+  BitBlt(hdc, X, Y,
+         bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight,
+         off_dc, 0, 0, SRCCOPY);
 
-  BLENDFUNCTION ftn;
-  ftn.BlendOp = AC_SRC_OVER;
-  ftn.BlendFlags = 0;
-  ftn.SourceConstantAlpha = 255;
-  ftn.AlphaFormat = AC_SRC_ALPHA;
-  pAlphaBlend(hdc, X, Y,
-              bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight,
-              off_dc, 0, 0,
-              bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight, ftn);
   DeleteObject(SelectObject(off_dc, off_oldbm));
   DeleteDC(off_dc);
 }

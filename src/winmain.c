@@ -538,23 +538,11 @@ update_glass(void)
     cfg.transparency == TR_GLASS && !win_is_fullscreen &&
     !(cfg.opaque_when_focused && term.has_focus);
 
-  // printf("Glass enabled? %s\n", enabled?"YES":"NO");
-
-  // TODO: find out if we are running on windows 10 or below.
-  // pSetWindowCompositionAttribute is available e.g. on 8.1,
-  // but we want to use the old method there.
-  printf("win_is_blurbehind_available(): %s\n", win_is_blurbehind_available() ? "true" : "false");
+  /* printf("win_is_blurbehind_available(): %s\n", win_is_blurbehind_available() ? "true" : "false"); */
   if (win_is_blurbehind_available() && pSetWindowCompositionAttribute) {
-    printf("Setting accent\n");
-    printf("enabled: %s\n", enabled ? "true" : "false");
-    WINCOMPATTR data;
-    data.dataSize = sizeof(data);
-    data.attribute = WCA_ACCENT_POLICY;
-    
-    WINCOMPATTR_DATA inner;
-    data.pData = &inner;
-    inner.AccentPolicy.accentState = enabled ? ACCENT_ENABLE_BLURBEHIND : ACCENT_DISABLED;
-    pSetWindowCompositionAttribute(wnd, &data); 
+    DWMACCENTPOLICY policy = { enabled ? ACCENT_ENABLE_BLURBEHIND : ACCENT_DISABLED, 0, 0, 0 };
+    WINCOMPATTR data = { WCA_ACCENT_POLICY, (WINCOMPATTR_DATA*)&policy, sizeof(WINCOMPATTR_DATA) };
+    pSetWindowCompositionAttribute(wnd, &data);
   }
   else if (pDwmExtendFrameIntoClientArea) {
     printf("Extending frame\n");
