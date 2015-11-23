@@ -1,3 +1,9 @@
+  * New OSC sequence to copy the window title to the clipboard (#303).
+
+### 2.1.5 (19 Aug 2015) ###
+  * Guard Shift-Ctrl-0 detection (#233) to avoid interference with keyboard switchers (#472).
+  * Basic fixes for displaying child process list on exit confirmation (#448).
+
 ### 2.1.4 (6 Aug 2015) ###
   * Not zooming font on Shift+Windows shortcuts (#467), by heuristic analysis of Windows messages.
   * Not daemonizing if started from ConEmu (#466), by heuristic check of $ConEmuPID.

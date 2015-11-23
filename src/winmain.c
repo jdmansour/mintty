@@ -719,7 +719,7 @@ confirm_exit(void)
     return true;
 
   /* retrieve list of child processes */
-  char * pscmd = "procps -o pid,ruser=USER -o comm -t %s 2> /dev/null || ps -ef";
+  char * pscmd = "/bin/procps -o pid,ruser=USER -o comm -t %s 2> /dev/null || /bin/ps -ef";
   char * tty = child_tty();
   if (strrchr (tty, '/'))
     tty = strrchr (tty, '/') + 1;
@@ -751,7 +751,7 @@ confirm_exit(void)
         strcat (msg, "\n");
       }
     }
-    fclose(procps);
+    pclose(procps);
   }
   msg = realloc (msg, strlen (msg) + strlen (msg_post) + 1);
   strcat (msg, msg_post);
@@ -857,8 +857,9 @@ win_proc(HWND wnd, UINT message, WPARAM wp, LPARAM lp)
     when WM_NCMOUSEMOVE: win_mouse_move(true, lp);
     when WM_MOUSEWHEEL: win_mouse_wheel(wp, lp);
     when WM_INPUTLANGCHANGEREQUEST:  // catch Shift-Control-0
-      if (win_key_down('0', lp))
-        return 0;
+      if ((GetKeyState(VK_SHIFT) & 0x80) && (GetKeyState(VK_CONTROL) & 0x80))
+        if (win_key_down('0', lp))
+          return 0;
     when WM_KEYDOWN or WM_SYSKEYDOWN:
       if (win_key_down(wp, lp))
         return 0;
