@@ -70,7 +70,8 @@ static const wchar linedraw_chars[LDRAW_CHAR_NUM][LDRAW_CHAR_TRIES] = {
 };
 
 #define OPAQUE_ALPHA 255
-#define MEDIUM_ALPHA 207
+#define MEDIUM_ALPHA 180
+// #define MEDIUM_ALPHA 207
 
 static enum {/*unused*/BOLD_NONE, BOLD_SHADOW, BOLD_FONT} bold_mode;
 static enum {UND_LINE, UND_FONT} und_mode;
@@ -636,17 +637,35 @@ MyExtTextOutW(HDC hdc, int X, int Y, UINT fuOptions, const RECT *lprc, LPCWSTR l
   RECT rcTranslated = {0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight};
   ExtTextOutW(off_dc, 0, 0, fuOptions, &rcTranslated, lpString, cbCount, lpDx);
 
-  // todo: make the text (foreground) completely opaque
+  // now draw alpha mask
+  void *pBitsAlpha;
+  HBITMAP off_alphabm = CreateDIBSection(off_dc, &bmi, DIB_RGB_COLORS, &pBitsAlpha, 0, 0);
+  SelectObject(off_dc, off_alphabm);
+  
+  SetBkMode(off_dc, GetBkMode(hdc));
+  SetTextColor(off_dc, RGB(255, 255, 255));
+  SelectObject(off_dc, GetCurrentObject(hdc, OBJ_FONT));
+  {HBRUSH oldbrush = SelectObject(off_dc, GetStockObject(BLACK_BRUSH));
+  Rectangle(off_dc, 0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight);
+  DeleteObject(SelectObject(off_dc, oldbrush));}
+  ExtTextOutW(off_dc, 0, 0, fuOptions, &rcTranslated, lpString, cbCount, lpDx);
+
   for (int y = 0; y < bmi.bmiHeader.biHeight; y++) {
     BYTE *pTmp = (BYTE *) pBits + bmi.bmiHeader.biWidth * 4 * y;
+    BYTE *pTmpAlpha = (BYTE *) pBitsAlpha + bmi.bmiHeader.biWidth * 4 * y;
     for (int x = 0; x < bmi.bmiHeader.biWidth; x++) {
-      pTmp[0] *= alpha/255.;
-      pTmp[1] *= alpha/255.;
-      pTmp[2] *= alpha/255.;
-      pTmp[3] = alpha;
+      float average = (pTmpAlpha[0]+pTmpAlpha[1]+pTmpAlpha[2])/3.;
+      float thisalpha = (average == 0) ? alpha : max(average, alpha);
+      pTmp[0] *= thisalpha/255.;
+      pTmp[1] *= thisalpha/255.;
+      pTmp[2] *= thisalpha/255.;
+      pTmp[3] = thisalpha;
+
       pTmp += 4;
+      pTmpAlpha += 4;
     }
   }
+  SelectObject(off_dc, off_bm);
 
   // DrawThemeTextEx is alpha-aware, to use it we would do something like 
   // this (below, incomplete).  We'd also have to figure out a replacement
@@ -671,7 +690,9 @@ MyExtTextOutW(HDC hdc, int X, int Y, UINT fuOptions, const RECT *lprc, LPCWSTR l
          bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight,
          off_dc, 0, 0, SRCCOPY);
 
-  DeleteObject(SelectObject(off_dc, off_oldbm));
+  SelectObject(off_dc, off_oldbm);
+  DeleteObject(off_bm);
+  DeleteObject(off_alphabm);
   DeleteDC(off_dc);
 }
 
