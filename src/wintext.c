@@ -616,39 +616,40 @@ MyExtTextOutW(HDC hdc, int X, int Y, UINT fuOptions, const RECT *lprc, LPCWSTR l
   HBITMAP off_bm = CreateDIBSection(off_dc, &bmi, DIB_RGB_COLORS, &pBits, 0, 0);
   HBITMAP off_oldbm = SelectObject(off_dc, off_bm);
 
-  if (fuOptions & ETO_OPAQUE)
-  {
-    fuOptions = fuOptions & ~ETO_OPAQUE;
-    SetBkMode(off_dc, GetBkMode(hdc));
-    SetBkColor(off_dc, GetBkColor(hdc));
-    SetTextColor(off_dc, GetTextColor(hdc));
-    SelectObject(off_dc, GetCurrentObject(hdc, OBJ_FONT));
-    HBRUSH oldbrush = SelectObject(off_dc, CreateSolidBrush(GetBkColor(hdc)));
-    Rectangle(off_dc, 0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight);
-    DeleteObject(SelectObject(off_dc, oldbrush));
-  }
+  SetBkMode(off_dc, GetBkMode(hdc));
+  SetBkColor(off_dc, GetBkColor(hdc));
+  SetTextColor(off_dc, GetTextColor(hdc));
+
+  HBRUSH oldbrush = SelectObject(off_dc, CreateSolidBrush(GetBkColor(hdc)));
+  Rectangle(off_dc, 0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight);
+  DeleteObject(SelectObject(off_dc, oldbrush));
+
+  SelectObject(off_dc, GetCurrentObject(hdc, OBJ_FONT));
 
   int alpha = OPAQUE_ALPHA;
   COLORREF bgcolor = GetBkColor(hdc);
   if (bgcolor == colours[BG_COLOUR_I] && cfg.transparency == TR_GLASS) {
     alpha = MEDIUM_ALPHA;
   }
+  if (!(fuOptions & ETO_OPAQUE)) {
+    // none-opaque mode, set background pixels to transparent
+    alpha = 0;
+  }
 
   RECT rcTranslated = {0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight};
-  ExtTextOutW(off_dc, 0, 0, fuOptions, &rcTranslated, lpString, cbCount, lpDx);
+  ExtTextOutW(off_dc, 0, 0, fuOptions&~ETO_OPAQUE, &rcTranslated, lpString, cbCount, lpDx);
 
   // now draw alpha mask
   void *pBitsAlpha;
   HBITMAP off_alphabm = CreateDIBSection(off_dc, &bmi, DIB_RGB_COLORS, &pBitsAlpha, 0, 0);
   SelectObject(off_dc, off_alphabm);
   
-  SetBkMode(off_dc, GetBkMode(hdc));
+  SetBkMode(off_dc, OPAQUE);
   SetTextColor(off_dc, RGB(255, 255, 255));
-  SelectObject(off_dc, GetCurrentObject(hdc, OBJ_FONT));
   {HBRUSH oldbrush = SelectObject(off_dc, GetStockObject(BLACK_BRUSH));
   Rectangle(off_dc, 0, 0, bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight);
   DeleteObject(SelectObject(off_dc, oldbrush));}
-  ExtTextOutW(off_dc, 0, 0, fuOptions, &rcTranslated, lpString, cbCount, lpDx);
+  ExtTextOutW(off_dc, 0, 0, fuOptions&~ETO_OPAQUE, &rcTranslated, lpString, cbCount, lpDx);
 
   for (int y = 0; y < bmi.bmiHeader.biHeight; y++) {
     BYTE *pTmp = (BYTE *) pBits + bmi.bmiHeader.biWidth * 4 * y;
@@ -686,9 +687,22 @@ MyExtTextOutW(HDC hdc, int X, int Y, UINT fuOptions, const RECT *lprc, LPCWSTR l
   // pDrawThemeTextEx(theme, off_dc, 0, 0, lpString, cbCount, dwFlags, &rcTranslated, &options);
   // pCloseThemeData(theme);
 
-  BitBlt(hdc, X, Y,
-         bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight,
-         off_dc, 0, 0, SRCCOPY);
+  if (fuOptions & ETO_OPAQUE) {
+    BitBlt(hdc, X, Y,
+           bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight,
+           off_dc, 0, 0, SRCCOPY);
+  } else {
+    BLENDFUNCTION bf;
+    bf.BlendOp = AC_SRC_OVER;
+    bf.BlendFlags = 0;
+    bf.SourceConstantAlpha = 255;
+    bf.AlphaFormat = AC_SRC_ALPHA;
+    AlphaBlend(hdc, X, Y,
+               bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight,
+               off_dc, 0, 0,
+               bmi.bmiHeader.biWidth, bmi.bmiHeader.biHeight,
+               bf);
+  }
 
   SelectObject(off_dc, off_oldbm);
   DeleteObject(off_bm);
