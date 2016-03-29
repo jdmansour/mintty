@@ -3,8 +3,7 @@
 
 #include <sys/termios.h>
 
-extern char * home;
-extern char * cmd;
+extern bool clone_size_token;
 
 extern void child_create(char * argv[], struct winsize * winp);
 extern void child_proc(void);

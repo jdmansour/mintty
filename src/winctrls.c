@@ -1,11 +1,13 @@
 // winctrls.c (part of mintty)
-// Copyright 2008-11 Andy Koppe
+// Copyright 2008-11 Andy Koppe, 2015-2016 Thomas Wolff
 // Adapted from code from PuTTY-0.60 by Simon Tatham and team.
+// (corresponds to putty:windows/winctrls.c)
 // Licensed under the terms of the GNU General Public License v3 or later.
 
 #include "winctrls.h"
 
 #include "winpriv.h"
+#include "charset.h"  // wcscpy
 
 #define _RPCNDR_H
 #define _WTYPES_H
@@ -322,9 +324,15 @@ button(ctrlpos * cp, char *btext, int bid, int defbtn)
   if (defbtn && cp->wnd)
     SendMessage(cp->wnd, DM_SETDEFID, bid, 0);
 
-  doctl(cp, r, "BUTTON",
-        BS_NOTIFY | WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-        (defbtn ? BS_DEFPUSHBUTTON : 0) | BS_PUSHBUTTON, 0, btext, bid);
+  HWND but = 
+    doctl(cp, r, "BUTTON",
+          BS_NOTIFY | WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+          (defbtn ? BS_DEFPUSHBUTTON : 0) | BS_PUSHBUTTON, 0, btext, bid);
+  // this is a special hack until a generic solution is crafted 
+  // for Unicode labels and maybe other fancy stuff
+  if (!strcmp(btext, "&Play")) {
+    SendMessageW(but, WM_SETTEXT, 0, (LPARAM)L"► &Play");
+  }
 
   cp->ypos += PUSHBTNHEIGHT + GAPBETWEEN;
 }
@@ -506,8 +514,9 @@ winctrl_cleanup(winctrls *wc)
   winctrl *c = wc->first;
   while (c) {
     winctrl *next = c->next;
-    if (c->ctrl)
+    if (c->ctrl) {
       c->ctrl->plat_ctrl = null;
+    }
     free(c->data);
     free(c);
     c = next;
@@ -774,8 +783,7 @@ winctrl_layout(winctrls *wc, ctrlpos *cp, controlset *s, int *id)
 
     if (colstart >= 0) {
      /*
-      * Update the ypos in all columns crossed by this
-      * control.
+      * Update the ypos in all columns crossed by this control.
       */
       int i;
       for (i = colstart; i < colstart + colspan; i++)
@@ -806,37 +814,123 @@ winctrl_set_focus(control *ctrl, int has_focus)
     dlg.focused = null;
 }
 
+#ifndef CF_INACTIVEFONTS
+# ifdef __MSABI_LONG
+#define CF_INACTIVEFONTS __MSABI_LONG (0x02000000)
+# else
+#define CF_INACTIVEFONTS 0x02000000
+# endif
+#endif
+
+#define dont_debug_fontsel
+
+#ifdef debug_fontsel
+#define trace_fontsel(params)	printf params
+#else
+#define trace_fontsel(params)	
+#endif
+
 static void
 select_font(winctrl *c)
 {
   font_spec fs = *(font_spec *) c->data;
+  LOGFONTW lf;
   HDC dc = GetDC(0);
-  LOGFONT lf;
   lf.lfHeight = -MulDiv(fs.size, GetDeviceCaps(dc, LOGPIXELSY), 72);
   ReleaseDC(0, dc);
   lf.lfWidth = lf.lfEscapement = lf.lfOrientation = 0;
   lf.lfItalic = lf.lfUnderline = lf.lfStrikeOut = 0;
-  lf.lfWeight = (fs.isbold ? FW_BOLD : 0);
+  lf.lfWeight = fs.weight ? fs.weight : fs.isbold ? FW_BOLD : 0;
   lf.lfCharSet = DEFAULT_CHARSET;
   lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
   lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
   lf.lfQuality = DEFAULT_QUALITY;
   lf.lfPitchAndFamily = FIXED_PITCH | FF_DONTCARE;
-  strlcpy(lf.lfFaceName, fs.name, sizeof lf.lfFaceName);
+#if CYGWIN_VERSION_API_MINOR >= 201
+  swprintf(lf.lfFaceName, lengthof(lf.lfFaceName), L"%ls", fs.name);
+#else
+  if (wcslen(fs.name) < lengthof(lf.lfFaceName))
+    wcscpy(lf.lfFaceName, fs.name);
+  else
+    wcscpy(lf.lfFaceName, L"Lucida Console");
+#endif
 
-  CHOOSEFONT cf;
+  UINT_PTR CALLBACK fonthook(HWND hdlg, UINT uiMsg, WPARAM wParam, LPARAM lParam)
+  {
+    (void)lParam;
+    if (uiMsg == WM_COMMAND && wParam == 1026) {  // Apply
+      LOGFONTW lfapply;
+      SendMessageW(hdlg, WM_CHOOSEFONT_GETLOGFONT, 0, (LPARAM)&lfapply);
+      font_spec * fsp = &new_cfg.font;
+      wstrset(&fsp->name, lfapply.lfFaceName);
+      trace_fontsel(("apply <%ls>\n", lfapply.lfFaceName));
+      HDC dc = GetDC(0);
+      fsp->size = -MulDiv(lfapply.lfHeight, 72, GetDeviceCaps(dc, LOGPIXELSY));
+      ReleaseDC(0, dc);
+      fsp->weight = lfapply.lfWeight;
+      fsp->isbold = (lfapply.lfWeight >= FW_BOLD);
+      // apply font
+      apply_config(false);
+      // update font spec label
+      c->ctrl->handler(c->ctrl, EVENT_REFRESH);  // -> dlg_stdfontsel_handler
+      //or dlg_fontsel_set(c->ctrl, fsp);
+    }
+    else if (uiMsg == WM_COMMAND && wParam == 1) {  // OK
+#ifdef failed_workaround_for_no_font_issue
+      /*
+        Trying to work-around issue #507
+        "There is no font with that name."
+        "Choose a font from the list of fonts."
+        as it occurs with Meslo LG L DZ for Powerline
+      */
+      LOGFONTW lfapply;
+      SendMessageW(hdlg, WM_CHOOSEFONT_GETLOGFONT, 0, (LPARAM)&lfapply);
+      // lfapply.lfFaceName is "Meslo LG L DZ for Powerline"
+      HWND wnd = GetDlgItem(hdlg, c->base_id +99);
+      int size = GetWindowTextLengthW(wnd) + 1;
+      wchar * fn = newn(wchar, size);
+      GetWindowTextW(wnd, fn, size);
+      // fn is "Meslo LG L DZ for Powerline RegularForPowerline"
+      // trying to fix the inconsistency with
+      SetWindowTextW(wnd, lfapply.lfFaceName);
+      // does not help...
+      // what a crap!
+#endif
+    }
+    else if (uiMsg == WM_COMMAND && wParam == 2) {  // Cancel
+    }
+    return 0;  // default processing
+  }
+
+  CHOOSEFONTW cf;
   cf.lStructSize = sizeof (cf);
   cf.hwndOwner = dlg.wnd;
   cf.lpLogFont = &lf;
+  cf.lpfnHook = fonthook;
   cf.Flags =
-    CF_FIXEDPITCHONLY | CF_FORCEFONTEXIST | CF_INITTOLOGFONTSTRUCT |
-    CF_SCREENFONTS | CF_NOSCRIPTSEL;
+    CF_INITTOLOGFONTSTRUCT | CF_FORCEFONTEXIST
+    | CF_FIXEDPITCHONLY | CF_NOVERTFONTS
+    | CF_NOSCRIPTSEL
+    | CF_APPLY | CF_ENABLEHOOK  // enable Apply button
+    ;
+  if (new_cfg.show_hidden_fonts)
+    // include fonts marked to Hide in Fonts Control Panel
+    cf.Flags |= CF_INACTIVEFONTS;
+  else
+    cf.Flags |= CF_SCRIPTSONLY; // exclude fonts with OEM or SYMBOL charset
 
-  if (ChooseFont(&cf)) {
-    strset(&fs.name, lf.lfFaceName);
-    fs.isbold = (lf.lfWeight == FW_BOLD);
+  // open font selection menu
+  if (ChooseFontW(&cf)) {
+    // font selection menu closed with OK
+    trace_fontsel(("OK <%ls>\n", lf.lfFaceName));
+    wstrset(&fs.name, lf.lfFaceName);
+    // here we could enumerate font widths and adjust...
+    // rather doing that in win_init_fonts
     fs.size = cf.iPointSize / 10;
+    fs.weight = lf.lfWeight;
+    fs.isbold = (lf.lfWeight >= FW_BOLD);
     dlg_fontsel_set(c->ctrl, &fs);
+    //call dlg_stdfontsel_handler
     c->ctrl->handler(c->ctrl, EVENT_VALCHANGE);
   }
 }
@@ -970,12 +1064,12 @@ winctrl_handle_command(UINT msg, WPARAM wParam, LPARAM lParam)
             when CBN_SELCHANGE: {
               int index = SendDlgItemMessage(
                             dlg.wnd, c->base_id + 1, CB_GETCURSEL, 0, 0);
-              int len = SendDlgItemMessage(
+              int wlen = SendDlgItemMessageW(
                           dlg.wnd, c->base_id + 1, CB_GETLBTEXTLEN, index, 0);
-              char text[len + 1];
-              SendDlgItemMessage(
-                dlg.wnd, c->base_id + 1, CB_GETLBTEXT, index, (LPARAM) text);
-              SetDlgItemText(dlg.wnd, c->base_id + 1, text);
+              wchar wtext[wlen + 1];
+              SendDlgItemMessageW(
+                dlg.wnd, c->base_id + 1, CB_GETLBTEXT, index, (LPARAM) wtext);
+              SetDlgItemTextW(dlg.wnd, c->base_id + 1, wtext);
               ctrl->handler(ctrl, EVENT_SELCHANGE);
             }
             when CBN_EDITCHANGE:
@@ -1070,15 +1164,79 @@ dlg_editbox_set(control *ctrl, string text)
 }
 
 void
+dlg_editbox_set_w(control *ctrl, wstring text)
+{
+  winctrl *c = ctrl->plat_ctrl;
+  assert(c &&
+         (c->ctrl->type == CTRL_EDITBOX
+         ||c->ctrl->type == CTRL_LISTBOX));
+  if (c->ctrl->type != CTRL_LISTBOX) {
+    SetDlgItemTextW(dlg.wnd, c->base_id + 1, text);
+  }
+  else {
+    HWND wnd = GetDlgItem(dlg.wnd, c->base_id + 1);
+    int len = wcslen(text);
+    wchar * buf = newn(wchar, len + 1);
+    int n = SendMessageW(wnd, LB_GETCOUNT, 0, (LPARAM)0);
+    for (int i = 0; i < n; i++) {
+      int ilen = SendMessageW(wnd, LB_GETTEXTLEN, i, (LPARAM)0);
+      if (ilen > len) {
+        buf = renewn(buf, ilen + 1);
+        len = ilen;
+      }
+      SendMessageW(wnd, LB_GETTEXT, i, (LPARAM)buf);
+      if (wcscmp(buf, text) == 0) {
+        SendMessageW(wnd, LB_SETCURSEL, i, (LPARAM)0);
+        break;
+      }
+    }
+    free(buf);
+  }
+}
+
+void
 dlg_editbox_get(control *ctrl, string *text_p)
 {
   winctrl *c = ctrl->plat_ctrl;
-  assert(c && c->ctrl->type == CTRL_EDITBOX);
+  assert(c &&
+         (c->ctrl->type == CTRL_EDITBOX
+         ||c->ctrl->type == CTRL_LISTBOX));
   HWND wnd = GetDlgItem(dlg.wnd, c->base_id + 1);
   int size = GetWindowTextLength(wnd) + 1;
   char *text = (char *)*text_p;
   text = renewn(text, size);
   GetWindowText(wnd, text, size);
+  *text_p = text;
+}
+
+void
+dlg_editbox_get_w(control *ctrl, wstring *text_p)
+{
+  winctrl *c = ctrl->plat_ctrl;
+  assert(c &&
+         (c->ctrl->type == CTRL_EDITBOX
+         ||c->ctrl->type == CTRL_LISTBOX));
+  HWND wnd = GetDlgItem(dlg.wnd, c->base_id + 1);
+  wchar *text = (wchar *)*text_p;
+  if (c->ctrl->type != CTRL_LISTBOX) {
+    // handle single-line editbox (with optional popup list)
+    int size = GetWindowTextLengthW(wnd) + 1;
+    text = renewn(text, size);
+    // In the popup editbox (combobox), 
+    // Windows goofs up non-ANSI characters here unless the 
+    // WM_COMMAND dialog callback function winctrl_handle_command above 
+    // (case CBN_SELCHANGE) also uses the Unicode function versions 
+    // SendDlgItemMessageW and SetDlgItemTextW
+    GetWindowTextW(wnd, text, size);
+    //GetDlgItemTextW(dlg.wnd, c->base_id + 1, text, size);  // same
+  }
+  else {
+    // handle multi-line listbox
+    int n = SendMessageW(wnd, LB_GETCURSEL, 0, (LPARAM)0);
+    int len = SendMessageW(wnd, LB_GETTEXTLEN, n, (LPARAM)0);
+    text = renewn(text, len + 1);
+    SendMessageW(wnd, LB_GETTEXT, n, (LPARAM)text);
+  }
   *text_p = text;
 }
 
@@ -1112,21 +1270,68 @@ dlg_listbox_add(control *ctrl, string text)
 }
 
 void
+dlg_listbox_add_w(control *ctrl, wstring text)
+{
+  winctrl *c = ctrl->plat_ctrl;
+  int msg;
+  assert(c &&
+         (c->ctrl->type == CTRL_LISTBOX ||
+          (c->ctrl->type == CTRL_EDITBOX &&
+           c->ctrl->editbox.has_list)));
+  msg = (c->ctrl->type == CTRL_LISTBOX &&
+         c->ctrl->listbox.height != 0 ? LB_ADDSTRING : CB_ADDSTRING);
+  SendDlgItemMessageW(dlg.wnd, c->base_id + 1, msg, 0, (LPARAM) text);
+}
+
+void
 dlg_fontsel_set(control *ctrl, font_spec *fs)
 {
   winctrl *c = ctrl->plat_ctrl;
   assert(c && c->ctrl->type == CTRL_FONTSELECT);
 
+  trace_fontsel(("fontsel_set <%ls>\n", fs->name));
   *(font_spec *) c->data = *fs;   /* structure copy */
 
-  char *boldstr = fs->isbold ? "bold, " : "";
-  char *buf =
+  int boldness = (fs->weight - 1) / 111;
+  static char * boldnesses[] = {
+    "Thin, ",
+    "Extralight, ",
+    "Light, ",
+    "",
+    "Medium, ",
+    "Semibold, ",
+    "Bold, ",
+    "Extrabold, ",
+    "Heavy, "
+  };
+  if (boldness < 0)
+    boldness = 0;
+  else if (boldness >= (int)lengthof(boldnesses))
+    boldness = lengthof(boldnesses) - 1;
+  //char * boldstr = fs->isbold ? "bold, " : "";
+  char * boldstr = boldnesses[boldness];
+#if CYGWIN_VERSION_API_MINOR >= 201
+  int wsize = wcslen(fs->name) + strlen(boldstr) + fs->size ? 31 : 17;
+  wchar * wbuf = newn(wchar, wsize);
+  if (fs->size)
+    swprintf(wbuf, wsize, L"%ls, %s%d%s", fs->name, boldstr, abs(fs->size),
+             fs->size < 0 ? "px" : "pt");
+  else
+    swprintf(wbuf, wsize, L"%ls, %sdefault size", fs->name, boldstr);
+  SetDlgItemTextW(dlg.wnd, c->base_id + 1, wbuf);
+  free(wbuf);
+#else
+  // no swprintf, don't like to fiddle label together for old MinGW
+  char * fn = cs__wcstombs(fs->name);
+  char * buf =
     fs->size
-    ? asform("%s, %s%d-%s", fs->name, boldstr, abs(fs->size),
-             fs->size < 0 ? "pixel" : "point")
-    : asform("%s, %sdefault height", fs->name, boldstr);
+    ? asform("%s, %s%d%s", fn, boldstr, abs(fs->size),
+             fs->size < 0 ? "px" : "pt")
+    : asform("%s, %sdefault size", fn, boldstr);
+  free(fn);
   SetDlgItemText(dlg.wnd, c->base_id + 1, buf);
   free(buf);
+#endif
 }
 
 void
@@ -1134,6 +1339,7 @@ dlg_fontsel_get(control *ctrl, font_spec *fs)
 {
   winctrl *c = ctrl->plat_ctrl;
   assert(c && c->ctrl->type == CTRL_FONTSELECT);
+  trace_fontsel(("fontsel_get <%ls>\n", ((font_spec*)c->data)->name));
   *fs = *(font_spec *) c->data;  /* structure copy */
 }
 

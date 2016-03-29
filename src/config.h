@@ -32,8 +32,9 @@ static inline uchar blue(colour c) { return c >> 16; }
 // Font properties.
 
 typedef struct {
-  string name;
+  wstring name;
   int size;
+  int weight;
   bool isbold;
 } font_spec;
 
@@ -44,12 +45,15 @@ typedef struct {
   // Looks
   colour fg_colour, bold_colour, bg_colour, cursor_colour;
   colour search_fg_colour, search_bg_colour, search_current_colour;
+  wstring theme_file;
   char transparency;
+  bool blurred;
   bool opaque_when_focused;
   char cursor_type;
   bool cursor_blinks;
   // Text
   font_spec font;
+  bool show_hidden_fonts;
   char font_smoothing;
   char bold_as_font;    // 0 = false, 1 = true, -1 = undefined
   bool bold_as_colour;
@@ -91,32 +95,35 @@ typedef struct {
   string search_bar;
   // Terminal
   string term;
-  string answerback;
+  wstring answerback;
   bool bell_sound;
   int bell_type;
+  wstring bell_file;
   int bell_freq;
   int bell_len;
   bool bell_flash;
   bool bell_taskbar;
-  string printer;
+  wstring printer;
   bool confirm_exit;
   // Command line
-  string class;
+  wstring class;
   char hold;
   bool exit_write;
-  string exit_title;
-  string icon;
-  string log;
-  string title;
+  wstring exit_title;
+  wstring icon;
+  wstring log;
+  wstring title;
   bool utmp;
   char window;
   int x, y;
   bool daemonize;
+  bool daemonize_always;
   // "Hidden"
-  string app_id;
-  string app_name;
-  string app_launch_cmd;
+  wstring app_id;
+  wstring app_name;
+  wstring app_launch_cmd;
   int col_spacing, row_spacing;
+  int padding;
   string word_chars;
   string word_chars_excl;
   colour ime_cursor_colour;
@@ -125,14 +132,16 @@ typedef struct {
   bool use_system_colours;
 } config;
 
-extern config cfg, new_cfg;
+extern config cfg, new_cfg, file_cfg;
 
 extern void init_config(void);
 extern void load_config(string filename, bool to_save);
+extern void load_theme(wstring theme);
 extern void set_arg_option(string name, string val);
 extern void parse_arg_option(string);
 extern void remember_arg(string);
 extern void finish_config(void);
-extern void copy_config(config *dst, const config *src);
+extern void copy_config(char * tag, config * dst, const config * src);
+extern void apply_config(bool save);
 
 #endif

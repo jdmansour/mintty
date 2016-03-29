@@ -1,6 +1,7 @@
 // ctrls.c (part of mintty)
 // Copyright 2008-11 Andy Koppe
 // Adapted from code from PuTTY-0.60 by Simon Tatham and team.
+// (corresponds to putty:dialog.c)
 // Licensed under the terms of the GNU General Public License v3 or later.
 
 #include "ctrls.h"
@@ -147,7 +148,7 @@ ctrl_new_set(controlbox *b, char *path, char *title)
   // Skip existing sets for the same path.
   while (index < b->nctrlsets && !strcmp(b->ctrlsets[index]->pathname, path))
     index++;
-  
+
   controlset *s = new(controlset);
   s->pathname = strdup(path);
   s->boxtitle = title ? strdup(title) : null;
@@ -241,6 +242,19 @@ ctrl_combobox(controlset *s, char *label, int percentage,
   c->editbox.percentwidth = percentage;
   c->editbox.password = 0;
   c->editbox.has_list = 1;
+  return c;
+}
+
+control *
+ctrl_listbox(controlset *s, char *label, int lines, int percentage,
+              handler_fn handler, void *context)
+{
+  control *c = ctrl_new(s, CTRL_LISTBOX, handler, context);
+  c->label = label ? strdup(label) : null;
+  c->listbox.percentwidth = percentage;
+  c->listbox.height = lines;
+  c->listbox.ncols = 0;
+  c->listbox.percentages = 0;
   return c;
 }
 
@@ -371,11 +385,11 @@ dlg_stdfontsel_handler(control *ctrl, int event)
 void
 dlg_stdstringbox_handler(control *ctrl, int event)
 {
-  string *sp = ctrl->context;
+  wstring *sp = ctrl->context;
   if (event == EVENT_VALCHANGE)
-    dlg_editbox_get(ctrl, sp);
+    dlg_editbox_get_w(ctrl, sp);
   else if (event == EVENT_REFRESH)
-    dlg_editbox_set(ctrl, *sp);
+    dlg_editbox_set_w(ctrl, *sp);
 }
 
 void

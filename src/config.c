@@ -1,5 +1,5 @@
 // config.c (part of mintty)
-// Copyright 2008-13 Andy Koppe
+// Copyright 2008-13 Andy Koppe, 2015-2016 Thomas Wolff
 // Based on code from PuTTY-0.60 by Simon Tatham and team.
 // Licensed under the terms of the GNU General Public License v3 or later.
 
@@ -12,29 +12,32 @@
 #include <termios.h>
 #include <sys/cygwin.h>
 
+
 #define dont_debug_config
 
-#if CYGWIN_VERSION_API_MINOR >= 222
+#define dont_support_blurred
+
+
 static wstring rc_filename = 0;
-#else
-static string rc_filename = 0;
-#endif
 
 const config default_cfg = {
   // Looks
   .fg_colour = 0xBFBFBF,
   .bold_colour = (colour)-1,
   .bg_colour = 0x000000,
+  .cursor_colour = 0xBFBFBF,
   .search_fg_colour = 0x000000,
   .search_bg_colour = 0x00DDDD,
   .search_current_colour = 0x0099DD,
-  .cursor_colour = 0xBFBFBF,
+  .theme_file = L"",
   .transparency = 0,
+  .blurred = false,
   .opaque_when_focused = false,
   .cursor_type = CUR_LINE,
   .cursor_blinks = true,
   // Text
-  .font = {.name = "Lucida Console", .isbold = false, .size = 9},
+  .font = {.name = L"Lucida Console", .size = 9, .weight = 400, .isbold = false},
+  .show_hidden_fonts = false,
   .font_smoothing = FS_DEFAULT,
   .bold_as_font = -1,  // -1 means "the opposite of bold_as_colour"
   .bold_as_colour = true,
@@ -53,8 +56,8 @@ const config default_cfg = {
   .alt_fn_shortcuts = true,
   .ctrl_shift_shortcuts = false,
   .key_prtscreen = "",	// VK_SNAPSHOT
-  .key_pause = "",	// VK_PAUSE
-  .key_break = "",	// VK_CANCEL
+  .key_pause = "",	// VK_PAUSE
+  .key_break = "",	// VK_CANCEL
   .key_menu = "",	// VK_APPS
   .key_scrlock = "",	// VK_SCROLL
   // Mouse
@@ -77,31 +80,34 @@ const config default_cfg = {
   .search_bar = "",
   // Terminal
   .term = "xterm",
-  .answerback = "",
+  .answerback = L"",
   .bell_sound = false,
-  .bell_type = 0,
+  .bell_type = 1,
+  .bell_file = L"",
   .bell_freq = 0,
   .bell_len = 400,
   .bell_flash = false,
   .bell_taskbar = true,
-  .printer = "",
+  .printer = L"",
   .confirm_exit = true,
   // Command line
-  .class = "",
+  .class = L"",
   .hold = HOLD_START,
   .exit_write = false,
-  .exit_title = "",
-  .icon = "",
-  .log = "",
+  .exit_title = L"",
+  .icon = L"",
+  .log = L"",
   .utmp = false,
-  .title = "",
+  .title = L"",
   .daemonize = true,
+  .daemonize_always = false,
   // "Hidden"
-  .app_id = "",
-  .app_name = "",
-  .app_launch_cmd = "",
+  .app_id = L"",
+  .app_name = L"",
+  .app_launch_cmd = L"",
   .col_spacing = 0,
   .row_spacing = 0,
+  .padding = 1,
   .word_chars = "",
   .word_chars_excl = "",
   .use_system_colours = false,
@@ -126,13 +132,12 @@ const config default_cfg = {
   }
 };
 
-config cfg, new_cfg;
-static config file_cfg;
+config cfg, new_cfg, file_cfg;
 
 typedef enum {
   OPT_BOOL, OPT_MOD, OPT_TRANS, OPT_CURSOR, OPT_FONTSMOOTH,
   OPT_MIDDLECLICK, OPT_RIGHTCLICK, OPT_SCROLLBAR, OPT_WINDOW, OPT_HOLD,
-  OPT_INT, OPT_COLOUR, OPT_STRING,
+  OPT_INT, OPT_COLOUR, OPT_STRING, OPT_WSTRING,
   OPT_LEGACY = 16
 } opt_type;
 
@@ -144,23 +149,34 @@ static const struct {
   ushort offset;
 }
 options[] = {
-  // Looks
+  // Colour base options;
+  // check_legacy_options() assumes these are the first three here:
   {"ForegroundColour", OPT_COLOUR, offcfg(fg_colour)},
-  {"BoldColour", OPT_COLOUR, offcfg(bold_colour)},
   {"BackgroundColour", OPT_COLOUR, offcfg(bg_colour)},
+  {"UseSystemColours", OPT_BOOL | OPT_LEGACY, offcfg(use_system_colours)},
+
+  // Looks
+  {"BoldColour", OPT_COLOUR, offcfg(bold_colour)},
+  {"CursorColour", OPT_COLOUR, offcfg(cursor_colour)},
   {"SearchForegroundColour", OPT_COLOUR, offcfg(search_fg_colour)},
   {"SearchBackgroundColour", OPT_COLOUR, offcfg(search_bg_colour)},
   {"SearchCurrentColour", OPT_COLOUR, offcfg(search_current_colour)},
-  {"CursorColour", OPT_COLOUR, offcfg(cursor_colour)},
+  {"ThemeFile", OPT_WSTRING, offcfg(theme_file)},
   {"Transparency", OPT_TRANS, offcfg(transparency)},
+#ifdef support_blurred
+  {"Blur", OPT_BOOL, offcfg(blurred)},
+#endif
   {"OpaqueWhenFocused", OPT_BOOL, offcfg(opaque_when_focused)},
   {"CursorType", OPT_CURSOR, offcfg(cursor_type)},
   {"CursorBlinks", OPT_BOOL, offcfg(cursor_blinks)},
 
   // Text
-  {"Font", OPT_STRING, offcfg(font.name)},
-  {"FontIsBold", OPT_BOOL, offcfg(font.isbold)},
+  {"Font", OPT_WSTRING, offcfg(font.name)},
+  {"FontSize", OPT_INT | OPT_LEGACY, offcfg(font.size)},
   {"FontHeight", OPT_INT, offcfg(font.size)},
+  {"FontWeight", OPT_INT, offcfg(font.weight)},
+  {"FontIsBold", OPT_BOOL, offcfg(font.isbold)},
+  {"ShowHiddenFonts", OPT_BOOL, offcfg(show_hidden_fonts)},
   {"FontSmoothing", OPT_FONTSMOOTH, offcfg(font_smoothing)},
   {"BoldAsFont", OPT_BOOL, offcfg(bold_as_font)},
   {"BoldAsColour", OPT_BOOL, offcfg(bold_as_colour)},
@@ -184,8 +200,8 @@ options[] = {
   {"Key_Break", OPT_STRING, offcfg(key_break)},
   {"Key_Menu", OPT_STRING, offcfg(key_menu)},
   {"Key_ScrollLock", OPT_STRING, offcfg(key_scrlock)},
-  {"Break", OPT_STRING, offcfg(key_break)},  // compatibility alternative
-  {"Pause", OPT_STRING, offcfg(key_pause)},  // compatibility alternative
+  {"Break", OPT_STRING | OPT_LEGACY, offcfg(key_break)},
+  {"Pause", OPT_STRING | OPT_LEGACY, offcfg(key_pause)},
 
   // Mouse
   {"CopyOnSelect", OPT_BOOL, offcfg(copy_on_select)},
@@ -209,36 +225,39 @@ options[] = {
 
   // Terminal
   {"Term", OPT_STRING, offcfg(term)},
-  {"Answerback", OPT_STRING, offcfg(answerback)},
+  {"Answerback", OPT_WSTRING, offcfg(answerback)},
   {"BellSound", OPT_BOOL, offcfg(bell_sound)},
   {"BellType", OPT_INT, offcfg(bell_type)},
+  {"BellFile", OPT_WSTRING, offcfg(bell_file)},
   {"BellFreq", OPT_INT, offcfg(bell_freq)},
   {"BellLen", OPT_INT, offcfg(bell_len)},
   {"BellFlash", OPT_BOOL, offcfg(bell_flash)},
   {"BellTaskbar", OPT_BOOL, offcfg(bell_taskbar)},
-  {"Printer", OPT_STRING, offcfg(printer)},
+  {"Printer", OPT_WSTRING, offcfg(printer)},
   {"ConfirmExit", OPT_BOOL, offcfg(confirm_exit)},
 
   // Command line
-  {"Class", OPT_STRING, offcfg(class)},
+  {"Class", OPT_WSTRING, offcfg(class)},
   {"Hold", OPT_HOLD, offcfg(hold)},
   {"Daemonize", OPT_BOOL, offcfg(daemonize)},
+  {"DaemonizeAlways", OPT_BOOL, offcfg(daemonize_always)},
   {"ExitWrite", OPT_BOOL, offcfg(exit_write)},
-  {"ExitTitle", OPT_STRING, offcfg(exit_title)},
-  {"Icon", OPT_STRING, offcfg(icon)},
-  {"Log", OPT_STRING, offcfg(log)},
-  {"Title", OPT_STRING, offcfg(title)},
+  {"ExitTitle", OPT_WSTRING, offcfg(exit_title)},
+  {"Icon", OPT_WSTRING, offcfg(icon)},
+  {"Log", OPT_WSTRING, offcfg(log)},
+  {"Title", OPT_WSTRING, offcfg(title)},
   {"Utmp", OPT_BOOL, offcfg(utmp)},
   {"Window", OPT_WINDOW, offcfg(window)},
   {"X", OPT_INT, offcfg(x)},
   {"Y", OPT_INT, offcfg(y)},
 
   // "Hidden"
-  {"AppID", OPT_STRING, offcfg(app_id)},
-  {"AppName", OPT_STRING, offcfg(app_name)},
-  {"AppLaunchCmd", OPT_STRING, offcfg(app_launch_cmd)},
+  {"AppID", OPT_WSTRING, offcfg(app_id)},
+  {"AppName", OPT_WSTRING, offcfg(app_name)},
+  {"AppLaunchCmd", OPT_WSTRING, offcfg(app_launch_cmd)},
   {"ColSpacing", OPT_INT, offcfg(col_spacing)},
   {"RowSpacing", OPT_INT, offcfg(row_spacing)},
+  {"Padding", OPT_INT, offcfg(padding)},
   {"WordChars", OPT_STRING, offcfg(word_chars)},
   {"WordCharsExcl", OPT_STRING, offcfg(word_chars_excl)},
   {"IMECursorColour", OPT_COLOUR, offcfg(ime_cursor_colour)},
@@ -262,7 +281,6 @@ options[] = {
   {"BoldWhite", OPT_COLOUR, offcfg(ansi_colours[BOLD_WHITE_I])},
 
   // Legacy
-  {"UseSystemColours", OPT_BOOL | OPT_LEGACY, offcfg(use_system_colours)},
   {"BoldAsBright", OPT_BOOL | OPT_LEGACY, offcfg(bold_as_colour)},
   {"FontQuality", OPT_FONTSMOOTH | OPT_LEGACY, offcfg(font_smoothing)},
 };
@@ -348,6 +366,14 @@ static opt_val
   }
 };
 
+
+#ifdef debug_theme
+#define trace_theme(params)	printf params
+#else
+#define trace_theme(params)
+#endif
+
+
 static int
 find_option(string name)
 {
@@ -359,20 +385,14 @@ find_option(string name)
   return -1;
 }
 
-static uchar file_opts[lengthof(options)], arg_opts[lengthof(options)];
+static uchar file_opts[lengthof(options)];
+static uchar arg_opts[lengthof(options)];
 static uint file_opts_num, arg_opts_num;
 
 static bool
 seen_file_option(uint i)
 {
   return memchr(file_opts, i, file_opts_num);
-}
-
-static void
-remember_file_option(uint i)
-{
-  if (!seen_file_option(i))
-    file_opts[file_opts_num++] = i;
 }
 
 static bool
@@ -382,8 +402,29 @@ seen_arg_option(uint i)
 }
 
 static void
-remember_arg_option(uint i)
+remember_file_option(char * tag, uint i)
 {
+  (void)tag;
+  trace_theme(("[%s] remember_file_option (file %d arg %d) %d %s\n", tag, seen_file_option(i), seen_arg_option(i), i, options[i].name));
+  if (i > 255) {
+    fprintf(stderr, "Internal error: too many options.\n");
+    exit(1);
+  }
+
+  if (!seen_file_option(i))
+    file_opts[file_opts_num++] = i;
+}
+
+static void
+remember_arg_option(char * tag, uint i)
+{
+  (void)tag;
+  trace_theme(("[%s] remember_arg_option (file %d arg %d) %d %s\n", tag, seen_file_option(i), seen_arg_option(i), i, options[i].name));
+  if (i > 255) {
+    fprintf(stderr, "Internal error: too many options.\n");
+    exit(1);
+  }
+
   if (!seen_arg_option(i))
     arg_opts[arg_opts_num++] = i;
 }
@@ -391,11 +432,11 @@ remember_arg_option(uint i)
 void
 remember_arg(string option)
 {
-  remember_arg_option(find_option(option));
+  remember_arg_option("rem_arg", find_option(option));
 }
 
 static void
-check_legacy_options(void (*remember_option)(uint))
+check_legacy_options(void (*remember_option)(char * tag, uint))
 {
   if (cfg.use_system_colours) {
     // Translate 'UseSystemColours' to colour settings.
@@ -405,9 +446,9 @@ check_legacy_options(void (*remember_option)(uint))
 
     // Make sure they're written to the config file.
     // This assumes that the colour options are the first three in options[].
-    remember_option(0);
-    remember_option(1);
-    remember_option(2);
+    remember_option("legacy", 0);
+    remember_option("legacy", 1);
+    remember_option("legacy", 2);
   }
 }
 
@@ -449,7 +490,7 @@ parse_colour(string s, colour *cp)
 }
 
 static int
-set_option(string name, string val_str)
+set_option(string name, string val_str, bool from_file)
 {
   int i = find_option(name);
   if (i < 0)
@@ -462,6 +503,16 @@ set_option(string name, string val_str)
     when OPT_STRING:
       strset(val_p, val_str);
       return i;
+    when OPT_WSTRING: {
+      wchar * ws;
+      if (from_file)
+        ws = cs__utforansitowcs(val_str);
+      else
+        ws = cs__mbstowcs(val_str);
+      wstrset(val_p, ws);
+      free(ws);
+      return i;
+    }
     when OPT_INT: {
       char *val_end;
       int val = strtol(val_str, &val_end, 0);
@@ -498,7 +549,7 @@ set_option(string name, string val_str)
 }
 
 static int
-parse_option(string option)
+parse_option(string option, bool from_file)
 {
   const char *eq = strchr(option, '=');
   if (!eq) {
@@ -519,14 +570,14 @@ parse_option(string option)
   while (isspace((uchar)*val))
     val++;
 
-  return set_option(name, val);
+  return set_option(name, val, from_file);
 }
 
 static void
 check_arg_option(int i)
 {
   if (i >= 0) {
-    remember_arg_option(i);
+    remember_arg_option("chk_arg", i);
     check_legacy_options(remember_arg_option);
   }
 }
@@ -534,18 +585,48 @@ check_arg_option(int i)
 void
 set_arg_option(string name, string val)
 {
-  check_arg_option(set_option(name, val));
+  check_arg_option(set_option(name, val, false));
 }
 
 void
 parse_arg_option(string option)
 {
-  check_arg_option(parse_option(option));
+  check_arg_option(parse_option(option, false));
+}
+
+void
+load_theme(wstring theme)
+{
+  wchar * theme_file = (wchar *)theme;
+  bool free_theme_file = false;
+  if (*theme && !wcschr(theme, L'/') && !wcschr(theme, L'\\')) {
+    string subfolder = ".mintty/themes";
+    char rcdir[strlen(home) + strlen(subfolder) + 2];
+    sprintf(rcdir, "%s/%s", home, subfolder);
+    wchar * rcpat = path_posix_to_win_w(rcdir);
+    int len = wcslen(rcpat);
+    rcpat = renewn(rcpat, len + wcslen(theme_file) + 2);
+    rcpat[len++] = L'/';
+    wcscpy(&rcpat[len], theme_file);
+    theme_file = rcpat;
+    free_theme_file = true;
+  }
+  char * filename = path_win_w_to_posix(theme_file);
+  if (free_theme_file)
+    free(theme_file);
+  load_config(filename, false);
+  free(filename);
 }
 
 void
 load_config(string filename, bool to_save)
 {
+  trace_theme(("load_config <%s> %d\n", filename, to_save));
+  if (!to_save) {
+    // restore base configuration, without theme mix-ins
+    copy_config("load", &cfg, &file_cfg);
+  }
+
   if (access(filename, R_OK) == 0 && access(filename, W_OK) < 0)
     to_save = false;
 
@@ -553,11 +634,7 @@ load_config(string filename, bool to_save)
     file_opts_num = arg_opts_num = 0;
 
     delete(rc_filename);
-#if CYGWIN_VERSION_API_MINOR >= 222
-    rc_filename = cygwin_create_path(CCP_POSIX_TO_WIN_W, filename);
-#else
-    rc_filename = strdup(filename);
-#endif
+    rc_filename = path_posix_to_win_w(filename);
   }
 #ifdef debug_config
   printf ("will save to %s? %d\n", filename, to_save);
@@ -569,9 +646,9 @@ load_config(string filename, bool to_save)
     while (fgets(line, sizeof line, file)) {
       line[strcspn(line, "\r\n")] = 0;  /* trim newline */
       if (line[0] != '#' && line[0] != '\0') {
-        int i = parse_option(line);
+        int i = parse_option(line, true);
         if (to_save && i >= 0)
-          remember_file_option(i);
+          remember_file_option("load", i);
       }
     }
     fclose(file);
@@ -579,12 +656,22 @@ load_config(string filename, bool to_save)
 
   check_legacy_options(remember_file_option);
 
-  copy_config(&file_cfg, &cfg);
+  if (to_save) {
+    copy_config("after load", &file_cfg, &cfg);
+  }
 }
 
 void
-copy_config(config *dst_p, const config *src_p)
+copy_config(char * tag, config * dst_p, const config * src_p)
 {
+#ifdef debug_theme
+  char * cfg(config * p) {
+    return p == new_cfg ? "new" : p == file_cfg ? "file" : p == cfg ? "cfg" : "?";
+  }
+  printf("[%s] copy_config %s <- %s\n", tag, cfg(dst_p), cfg(src_p));
+#else
+  (void)tag;
+#endif
   for (uint i = 0; i < lengthof(options); i++) {
     opt_type type = options[i].type;
     if (!(type & OPT_LEGACY)) {
@@ -594,6 +681,8 @@ copy_config(config *dst_p, const config *src_p)
       switch (type) {
         when OPT_STRING:
           strset(dst_val_p, *(string *)src_val_p);
+        when OPT_WSTRING:
+          wstrset(dst_val_p, *(wstring *)src_val_p);
         when OPT_INT or OPT_COLOUR:
           *(int *)dst_val_p = *(int *)src_val_p;
         otherwise:
@@ -606,7 +695,7 @@ copy_config(config *dst_p, const config *src_p)
 void
 init_config(void)
 {
-  copy_config(&cfg, &default_cfg);
+  copy_config("init", &cfg, &default_cfg);
 }
 
 void
@@ -624,7 +713,7 @@ finish_config(void)
   // bold_as_font used to be implied by !bold_as_colour.
   if (cfg.bold_as_font == -1) {
     cfg.bold_as_font = !cfg.bold_as_colour;
-    remember_file_option(find_option("BoldAsFont"));
+    remember_file_option("finish", find_option("BoldAsFont"));
   }
 
   if (0 < cfg.transparency && cfg.transparency <= 3)
@@ -636,11 +725,7 @@ save_config(void)
 {
   string filename;
 
-#if CYGWIN_VERSION_API_MINOR >= 222
-  filename = cygwin_create_path(CCP_WIN_W_TO_POSIX, rc_filename);
-#else
-  filename = rc_filename;
-#endif
+  filename = path_win_w_to_posix(rc_filename);
 
   FILE *file = fopen(filename, "w");
 
@@ -661,11 +746,17 @@ save_config(void)
       opt_type type = options[i].type;
       if (!(type & OPT_LEGACY)) {
         fprintf(file, "%s=", options[i].name);
-        void *cfg_p = seen_arg_option(i) ? &file_cfg : &cfg;
+        //?void *cfg_p = seen_arg_option(i) ? &file_cfg : &cfg;
+        void *cfg_p = &file_cfg;
         void *val_p = cfg_p + options[i].offset;
         switch (type) {
           when OPT_STRING:
             fprintf(file, "%s", *(string *)val_p);
+          when OPT_WSTRING: {
+            char * s = cs__wcstoutf(*(wstring *)val_p);
+            fprintf(file, "%s", s);
+            free(s);
+          }
           when OPT_INT:
             fprintf(file, "%i", *(int *)val_p);
           when OPT_COLOUR: {
@@ -691,39 +782,50 @@ save_config(void)
     fclose(file);
   }
 
-#if CYGWIN_VERSION_API_MINOR >= 222
   delete(filename);
-#endif
 }
 
 
 static control *cols_box, *rows_box, *locale_box, *charset_box;
 
-static void
+void
 apply_config(bool save)
 {
   // Record what's changed
   for (uint i = 0; i < lengthof(options); i++) {
     opt_type type = options[i].type;
     uint offset = options[i].offset;
-    void *val_p = (void *)&cfg + offset;
+    //void *val_p = (void *)&cfg + offset;
+    void *val_p = (void *)&file_cfg + offset;
     void *new_val_p = (void *)&new_cfg + offset;
     bool changed;
     switch (type) {
       when OPT_STRING:
         changed = strcmp(*(string *)val_p, *(string *)new_val_p);
+      when OPT_WSTRING:
+        changed = wcscmp(*(wstring *)val_p, *(wstring *)new_val_p);
       when OPT_INT or OPT_COLOUR:
         changed = (*(int *)val_p != *(int *)new_val_p);
       otherwise:
         changed = (*(char *)val_p != *(char *)new_val_p);
     }
-    if (changed && !seen_arg_option(i))
-      remember_file_option(i);
+    if (changed) {
+      remember_file_option("apply", i);
+    }
   }
 
-  win_reconfig();
+  copy_config("apply", &file_cfg, &new_cfg);
+  win_reconfig();  // copy_config(&cfg, &new_cfg);
   if (save)
     save_config();
+  bool had_theme = !!*cfg.theme_file;
+
+  if (*cfg.theme_file) {
+    load_theme(cfg.theme_file);
+    win_reset_colours();
+  }
+  else if (had_theme)
+    win_reset_colours();
 }
 
 static void
@@ -768,23 +870,32 @@ current_size_handler(control *unused(ctrl), int event)
 }
 
 static void
-printerbox_handler(control *ctrl, int event)
+printer_handler(control *ctrl, int event)
 {
-  const string NONE = "None (printing disabled)";
-  string printer = new_cfg.printer;
+  const wstring NONE = L"◇ None (printing disabled) ◇";  // ♢◇
+  const wstring CFG_NONE = L"";
+  const wstring DEFAULT = L"◆ Default printer ◆";  // ♦◆
+  const wstring CFG_DEFAULT = L"*";
+  wstring printer = new_cfg.printer;
   if (event == EVENT_REFRESH) {
     dlg_listbox_clear(ctrl);
-    dlg_listbox_add(ctrl, NONE);
+    dlg_listbox_add_w(ctrl, NONE);
+    dlg_listbox_add_w(ctrl, DEFAULT);
     uint num = printer_start_enum();
     for (uint i = 0; i < num; i++)
-      dlg_listbox_add(ctrl, printer_get_name(i));
+      dlg_listbox_add_w(ctrl, (wchar *)printer_get_name(i));
     printer_finish_enum();
-    dlg_editbox_set(ctrl, *printer ? printer : NONE);
+    if (*printer == '*')
+      dlg_editbox_set_w(ctrl, DEFAULT);
+    else
+      dlg_editbox_set_w(ctrl, *printer ? printer : NONE);
   }
   else if (event == EVENT_VALCHANGE || event == EVENT_SELCHANGE) {
-    dlg_editbox_get(ctrl, &printer);
-    if (!strcmp(printer, NONE))
-      strset(&printer, "");
+    dlg_editbox_get_w(ctrl, &printer);
+    if (!wcscmp(printer, NONE))
+      wstrset(&printer, CFG_NONE);
+    else if (!wcscmp(printer, DEFAULT))
+      wstrset(&printer, CFG_DEFAULT);
     new_cfg.printer = printer;
   }
 }
@@ -882,6 +993,143 @@ term_handler(control *ctrl, int event)
   }
 }
 
+//  1 -> 0x00000000 MB_OK              Default Beep
+//  2 -> 0x00000010 MB_ICONSTOP        Critical Stop
+//  3 -> 0x00000020 MB_ICONQUESTION    Question
+//  4 -> 0x00000030 MB_ICONEXCLAMATION Exclamation
+//  5 -> 0x00000040 MB_ICONASTERISK    Asterisk
+// -1 -> 0xFFFFFFFF                    Simple Beep
+static string beeps[] = {
+  "simple",
+  "none",
+  "default",
+  "Critical Stop",
+  "Question",
+  "Exclamation",
+  "Asterisk",
+};
+
+static void
+bell_handler(control *ctrl, int event)
+{
+  switch (event) {
+    when EVENT_REFRESH:
+      dlg_listbox_clear(ctrl);
+      int sel = -1;
+      for (uint i = 0; i < lengthof(beeps); i++) {
+        dlg_listbox_add(ctrl, beeps[i]);
+        if ((int)i == new_cfg.bell_type + 1)
+          sel = i;
+      }
+      if (sel >= 0)
+        dlg_editbox_set(ctrl, beeps[sel]);
+    when EVENT_VALCHANGE or EVENT_SELCHANGE: {
+      char * beep = malloc(0);
+      dlg_editbox_get(ctrl, (string *)&beep);
+      for (uint i = 0; i < lengthof(beeps); i++) {
+        if (!strcmp(beep, beeps[i])) {
+          new_cfg.bell_type = i - 1;
+          break;
+        }
+      }
+      free(beep);
+      win_bell(&new_cfg);
+    }
+  }
+}
+
+#include "winpriv.h"  // home
+
+static void
+add_file_resources(control *ctrl, wstring pattern)
+{
+  string subfolder = ".mintty";
+  char rcdir[strlen(home) + strlen(subfolder) + 2];
+  sprintf(rcdir, "%s/%s", home, subfolder);
+  wchar * rcpat = path_posix_to_win_w(rcdir);
+  int len = wcslen(rcpat);
+  rcpat = renewn(rcpat, len + wcslen(pattern) + 2);
+  rcpat[len++] = L'/';
+  wcscpy(&rcpat[len], pattern);
+
+  wstring suf = wcsrchr(pattern, L'.');
+  int sufl = suf ? wcslen(suf) : 0;
+
+  WIN32_FIND_DATAW ffd;
+  HANDLE hFind = FindFirstFileW(rcpat, &ffd);
+  int ok = hFind != INVALID_HANDLE_VALUE;
+  //if (!ok) retry with "/usr/share/mintty"?
+  //(then check also win_bell() and load_theme())
+  while (ok) {
+    if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      // skip
+    }
+    else {
+      //LARGE_INTEGER filesize = {.LowPart = ffd.nFileSizeLow, .HighPart = ffd.nFileSizeHigh};
+      //long s = filesize.QuadPart;
+
+      // strip suffix
+      int len = wcslen(ffd.cFileName);
+      if (ffd.cFileName[0] != '.' && ffd.cFileName[len - 1] != '~') {
+        ffd.cFileName[len - sufl] = 0;
+        dlg_listbox_add_w(ctrl, ffd.cFileName);
+      }
+    }
+    ok = FindNextFileW(hFind, &ffd);
+  }
+  FindClose(hFind);
+}
+
+static void
+bellfile_handler(control *ctrl, int event)
+{
+  const wstring NONE = L"◇ None (system sound) ◇";  // ♢◇
+  const wstring CFG_NONE = L"";
+  wstring bell_file = new_cfg.bell_file;
+  if (event == EVENT_REFRESH) {
+    dlg_listbox_clear(ctrl);
+    dlg_listbox_add_w(ctrl, NONE);
+    add_file_resources(ctrl, L"sounds/*.wav"); //  dlg_listbox_add_w(ctrl, L"...");
+    // strip std dir prefix...
+    dlg_editbox_set_w(ctrl, *bell_file ? bell_file : NONE);
+  }
+  else if (event == EVENT_VALCHANGE || event == EVENT_SELCHANGE) {
+    dlg_editbox_get_w(ctrl, &bell_file);
+    if (!wcscmp(bell_file, NONE))
+      wstrset(&bell_file, CFG_NONE);
+    // add std dir prefix?
+    new_cfg.bell_file = bell_file;
+    win_bell(&new_cfg);
+  }
+}
+
+static void
+theme_handler(control *ctrl, int event)
+{
+  const wstring NONE = L"◇ None ◇";  // ♢◇
+  const wstring CFG_NONE = L"";
+  wstring theme_file = new_cfg.theme_file;
+  if (event == EVENT_REFRESH) {
+    dlg_listbox_clear(ctrl);
+    dlg_listbox_add_w(ctrl, NONE);
+    add_file_resources(ctrl, L"themes/*"); //  dlg_listbox_add_w(ctrl, L"...");
+    dlg_editbox_set_w(ctrl, *theme_file ? theme_file : NONE);
+  }
+  else if (event == EVENT_VALCHANGE || event == EVENT_SELCHANGE) {
+    dlg_editbox_get_w(ctrl, &theme_file);
+    if (!wcscmp(theme_file, NONE))
+      wstrset(&theme_file, CFG_NONE);
+    new_cfg.theme_file = theme_file;
+  }
+}
+
+static void
+bell_tester(control *unused(ctrl), int event)
+{
+  if (event == EVENT_ACTION)
+    win_bell(&new_cfg);
+}
+
 void
 setup_config_box(controlbox * b)
 {
@@ -919,6 +1167,9 @@ setup_config_box(controlbox * b)
   ctrl_pushbutton(
     s, "&Cursor...", dlg_stdcolour_handler, &new_cfg.cursor_colour
   )->column = 2;
+  ctrl_combobox(
+    s, "&Theme", 80, theme_handler, &new_cfg.theme_file
+  );
 
   s = ctrl_new_set(b, "Looks", "Transparency");
   bool with_glass = win_is_glass_available();
@@ -932,10 +1183,22 @@ setup_config_box(controlbox * b)
     with_glass ? "Gla&ss" : null, TR_GLASS,
     null
   );
+#ifdef support_blurred
+  ctrl_columns(s, 2, with_glass ? 80 : 75, with_glass ? 20 : 25);
+  ctrl_checkbox(
+    s, "Opa&que when focused",
+    dlg_stdcheckbox_handler, &new_cfg.opaque_when_focused
+  )->column = 0;
+  ctrl_checkbox(
+    s, "&Blur",
+    dlg_stdcheckbox_handler, &new_cfg.blurred
+  )->column = 1;
+#else
   ctrl_checkbox(
     s, "Opa&que when focused",
     dlg_stdcheckbox_handler, &new_cfg.opaque_when_focused
   );
+#endif
 
   s = ctrl_new_set(b, "Looks", "Cursor");
   ctrl_radiobuttons(
@@ -1147,10 +1410,10 @@ setup_config_box(controlbox * b)
     s, "&Answerback", 100, dlg_stdstringbox_handler, &new_cfg.answerback
   )->column = 1;
 
-  s = ctrl_new_set(b, "Terminal", "Bell");
-  ctrl_columns(s, 3, 25, 25, 50);
-  ctrl_checkbox(
-    s, "&Sound", dlg_stdcheckbox_handler, &new_cfg.bell_sound
+  s = ctrl_new_set(b, "Terminal", "Bell (sound overridden by Wave/BellFile or BellFreq)");
+  ctrl_columns(s, 3, 36, 19, 45);
+  ctrl_combobox(
+    s, null, 100, bell_handler, 0
   )->column = 0;
   ctrl_checkbox(
     s, "&Flash", dlg_stdcheckbox_handler, &new_cfg.bell_flash
@@ -1158,11 +1421,31 @@ setup_config_box(controlbox * b)
   ctrl_checkbox(
     s, "&Highlight in taskbar", dlg_stdcheckbox_handler, &new_cfg.bell_taskbar
   )->column = 2;
+  ctrl_columns(s, 1, 100);  // reset column stuff so we can rearrange them
+  ctrl_columns(s, 2, 82, 18);
+#ifdef use_belleditbox
+  ctrl_editbox(
+    s, "&Wave", 83, dlg_stdstringbox_handler, &new_cfg.bell_file
+  )->column = 0;
+#else
+  ctrl_combobox(
+    s, "&Wave", 83, bellfile_handler, &new_cfg.bell_file
+  )->column = 0;
+#endif
+  ctrl_pushbutton(
+    s, "&Play", bell_tester, 0
+  )->column = 1;
 
   s = ctrl_new_set(b, "Terminal", "Printer");
-  ctrl_combobox(
-    s, null, 100, printerbox_handler, 0
+#ifdef use_multi_listbox_for_printers
+  ctrl_listbox(
+    s, null, 4, 100, printer_handler, 0
   );
+#else
+  ctrl_combobox(
+    s, null, 100, printer_handler, 0
+  );
+#endif
 
   s = ctrl_new_set(b, "Terminal", null);
   ctrl_checkbox(

@@ -1,5 +1,80 @@
-  * Extended special key redefinition options (#494).
+### 2.3.3 (21 Mar 2016) ###
+
+  * Limit font warning to fonts with neither ANSI nor system locale support (#527).
+  * Also include OEM/SYMBOL fonts with option -o ShowHiddenFonts=yes.
+
+### 2.3.2 (20 Mar 2016) ###
+
+  * Fixed 64 bit adaptation for weird Windows function.
+
+### 2.3.1 (20 Mar 2016) ###
+
+  * Fixed character set support warning for non-Western system locales (#527).
+  * Fixed log output to stdout (-l "-") (#528).
+
+### 2.2.4 (20 Mar 2016) ###
+
+Font configuration:
+  * Mintty adjusts row spacing according to the font metrics, to compensate for tight or tall spacing of some fonts (e.g. Consolas, FreeMono, Monaco). (The RowSpacing value is added to that.)
+  * Adjusting font weight selection to available font weights (#520).
+  * New option FontWeight supports more specific font weight selection (#520).
+  * Font selection menu has its own Apply button.
+  * Fonts with name problems (long names, #507) can be selected with the Apply button.
+  * Warnings for font not found or not supporting ANSI character set.
+  * Excluding fonts with OEM or SYMBOL charset from font selection menu.
+  * Excluding vertical fonts from font selection menu.
+  * New option ShowHiddenFonts to offer monospace fonts marked to Hide in the menu.
+  * Unicode-enabled Font setting (so e.g. mintty -o Font=Sütterlin works).
+
+Themes, Configuration, and Options menu:
+  * Colour schemes: New option ThemeFile, configuration also in Options menu (~#193).
+  * Configuration of .wav bell sounds (option BellFile, #369) in Options menu.
+  * Resource directory $HOME/.mintty for theme and bell files.
+  * Fixed -o settings to also be saved when changed in Options menu.
+
+Keyboard and mouse features:
+  * Workaround for occasional Alt state inconsistencies after window focus changes (#519).
+  * Compose key on wiki pages: replace AllChars with WinCompose.
+  * Opening marked "www." addresses also without "http:" prefix (#345).
+
+Start and error handling:
+  * Fixed -C/--loadconfig to not overwrite common options in main config file.
+  * Fixed format substitution for log file in case of excess % conversions.
+  * Report full pathname of log file if creation fails.
+  * Improved and fixed format of child creation error messages.
+  * Improved reporting failed icon loading with non-ANSI icon filenames.
+
+### 2.2.3 (7 Feb 2016) ###
+
+Desktop integration:
+  * Deriving icon from shortcut (#471, ~#420, ~~#486).
+  * New option -D with impact to shortcut key behaviour (~#499).
   * Not failing to start if daemonizing fails (#493).
+  * Shift+Alt+F2 clones the window at the configured size.
+  * Fixed Alt+F10 to restore the configured size even in Alt+F2-cloned window.
+  * Fixed Shift+Alt+F10 to restore both window size and font size.
+  * Limiting drag-and-drop pasting to actual terminal window, not Options menu.
+  * Handling changing window frame geometry (e.g. Personalization) (~#429).
+
+Terminal layout:
+  * Not switching transparency when entering search bar (#497, thanks to Kai).
+  * New option Padding (#511).
+  * Adjusting window to font change (#429) and sending notification if enabled.
+
+Keyboard:
+  * Extended special key redefinition options (#494).
+  * Fixed broken Pause/Break key defaults (#515), tweaked configuration.
+
+Bell:
+  * Added configuration option BellFile (#369) to play wav sounds.
+  * Enhanced bell sound selection in Options menu; option BellSound obsolete.
+  * Test button for bell sound in Options menu.
+
+Configuration and Printing:
+  * Support process ID substitution (for %d) in log file name.
+  * Support for Unicode configuration strings and Unicode printer names.
+  * Support for printing fixed and tweaked, using terminal character set.
+  * Indicating Printing status in window title, in case of pseudo-blocking.
 
 ### 2.2.2 (12 Nov 2015) ###
 
@@ -464,7 +539,7 @@ Locales and charsets:
   * The 'Codepage' option is now called 'Character set', and there's a new 'Locale' option for language and territory.
   * If no locale is set in the options, mintty uses the locale specified via the environment variables LC\_ALL, LC\_CTYPE, or LANG.
   * If the locale option is set, the character set is appended to it and the LANG variable set accordingly and LC\_ALL and LC\_CTYPE are cleared.
-  * e @cjknarrow locale modifier is automatically appended to LANG if an ambiguous-narrow font is used with an East Asian locale. (See also http://www.cygwin.com/1.7/cygwin-ug-net/setup-locale.html)
+  * The @cjknarrow locale modifier is automatically appended to LANG if an ambiguous-narrow font is used with an East Asian locale. (See also http://www.cygwin.com/1.7/cygwin-ug-net/setup-locale.html)
   * Any character sets supported by Cygwin or Windows can be used. The dropdown menu lists many of those supported by Cygwin, including UTF-8, the ISO charsets, and also the system's OEM and ANSI codepages. Other Windows codepages can be entered manually using the CP123 format. (Just entering the number works too.)
   * East Asian double-byte character sets such as GBK or eucJP are now supported (if they are installed).
   * Unicode characters outside the basic multilingual plane can now be displayed if a suitable font is available, which should always be the case on Vista and 7. (Please note, however, that currently many programs do not support these correctly, due to Windows' use of UTF-16 to represent Unicode).

@@ -23,7 +23,7 @@ extern int font_width, font_height;
 
 extern bool win_is_fullscreen;
 
-enum { PADDING = 1 };
+extern int PADDING;
 
 extern void win_paint(void);
 
@@ -45,6 +45,7 @@ extern void win_mouse_release(mouse_button, LPARAM);
 extern void win_mouse_wheel(WPARAM, LPARAM);
 extern void win_mouse_move(bool nc, LPARAM);
 
+extern void win_key_reset(void);
 extern bool win_key_down(WPARAM, LPARAM);
 extern bool win_key_up(WPARAM, LPARAM);
 

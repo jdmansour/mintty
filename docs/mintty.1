@@ -54,7 +54,7 @@ Read settings from the specified configuration file, in addition to
 \fI/etc/minttyrc\fP and \fI~/.minttyrc\fP.
 The file is not taken into account for saving configuration changes.
 This is useful to mix-in partial configuration variants, particularly 
-colour schemes.
+colour schemes. However, \fB-o ThemeFile=\fIFILENAME\fP may be preferable.
 
 .TP
 \fB-e\fP, \fB--exec\fP \fIPROGRAM\fP [\fIARG\fP ...]
@@ -89,12 +89,16 @@ multiple icons.
 \fINote:\fP About interaction problems of icon, shortcut, and the Windows taskbar:
 In a Windows desktop shortcut, to achieve consistent icon behaviour, 
 the same icon should be specified in the shortcut properties (Change Icon...) 
-and the mintty command line (Target:).
+and the mintty command line (Target:),
+or (beginning 2.2.3) no icon should be specified on the command line as 
+mintty will then take the icon from the invoking shortcut, 
+also resolving a leading Windows environment variable (like %SystemRoot%).
 
 .TP
 \fB-l\fP, \fB--log\fP \fIFILE\fP|\fB-\fP
 Copy all output into the specified log file, or standard output if a dash is
 given instead of a file name.
+If FILE contains \fB%d\fP it will be substituted with the process ID.
 (See also \fIscript\fP(1) for a more flexible logging tool.)
 
 .TP
@@ -123,7 +127,7 @@ window border relative to the monitor.
 \(en Otherwise, coordinates are absolute and address the common multi-monitor 
 address space as provided by Windows.
 
-Note: For another option to select the monitor for a new mintty window, 
+\fINote:\fP For another option to select the monitor for a new mintty window, 
 see the description of Alt+F2.
 
 .TP
@@ -171,9 +175,19 @@ The default is "mintty".
 .TP
 \fB-d\fP, \fB--nodaemon\fP
 Do not apply "daemonizing".
-By default, mintty tries to detach itself from the invoking terminal 
-in order to avoid disabled signal reception, and when cloning the window 
-(Alt+F2) in order to avoid a remaining zombie process.
+By default, mintty tries to detach itself from the invoking terminal when 
+started from a Cygwin Console in order to avoid disabled signal reception, 
+and when cloning the window (Alt+F2) in order to avoid a remaining zombie process.
+
+.TP
+\fB-D\fP, \fB--daemon\fP
+Enforce "daemonizing".
+By default, mintty tries to detach itself from the invoking terminal only 
+as described above. With this option, it tries to detach always.
+This makes a difference if a Windows "Shortcut key" is configured in a 
+Windows desktop shortcut for starting mintty. Without daemonizing, the 
+shortcut key will focus an already running instance of mintty, with 
+daemonizing it always starts a new instance.
 
 .TP
 \fB-R\fP, \fB--Reportpos\fP \fImode\fP
@@ -232,11 +246,11 @@ By default, selected text is automatically copied to the clipboard.
 This can be disabled on the \fBMouse\fP page of the options dialog.
 Selected text can also be copied manually using either the \fBCopy\fP menu
 command, the \fBCtrl+Ins\fP keyboard shortcut, or the middle mouse button
-combined with \fBShift\fP. 
+combined with \fBShift\fP.
 
 The selected region is copied as "rich text" as well as normal text,
 which means it can be pasted with colours and formatting into applications
-that support it, e.g. word processors.
+that support it, e.g. word processors ("true colour" attributes are not supported).
 
 The window title can be copied using the \fBCopy Title\fP command in the window
 menu.
@@ -254,9 +268,9 @@ They are inserted in the same way as if they were pasted from the clipboard.
 
 .SS Opening files, directories and URLs
 
-Files, directories and URLs can be opened either by holding \fBCtrl\fP while
-left-clicking on them, or by selecting them and choosing the \fBOpen\fP
-command from the context menu.
+Files, directories, URLs and web addresses beginning with "www." can be 
+opened either by holding \fBCtrl\fP while left-clicking on them, or by 
+selecting them and choosing the \fBOpen\fP command from the context menu.
 Please note that opening a file or directory with a relative path only works
 correctly if the path refers to the current working directory of the process
 invoked by mintty.
@@ -313,6 +327,7 @@ or the generic window title functions.
 If the window has been resized, it can be returned to the default size set in
 the Window pane of the options using the \fBDefault size\fP command in the
 menu or the \fBAlt+F10\fP shortcut.
+\fBShift+Alt+F10\fP also restores the font size to its default.
 
 .SS Reset
 
@@ -427,7 +442,9 @@ An overview of all the keyboard shortcuts.
 .TP
 \fBWindow commands\fP
 .br
-\(en \fBAlt+F2\fP: New (clone); see notes below
+\(en \fBAlt+F2\fP: New (clone window at current size); see notes below
+.br
+\(en \fBShift+Alt+F2\fP: New (clone window at configured size); see notes below
 .br
 \(en \fBAlt+F3\fP: Search (in scrollback buffer)
 .br
@@ -436,6 +453,8 @@ An overview of all the keyboard shortcuts.
 \(en \fBAlt+F8\fP: Reset
 .br
 \(en \fBAlt+F10\fP: Default terminal size (rows/columns)
+.br
+\(en \fBShift+Alt+F10\fP: Default terminal size (rows/columns) and font size
 .br
 \(en \fBAlt+F11\fP or \fBAlt+Enter\fP: Toggle full screen
 .br
@@ -519,8 +538,8 @@ or the window menu.  It has the following action buttons:
 .br
 \(en \fBApply\fP: applies changes to the current instance of mintty 
   but does not save them to the configuration file. So using \fBApply\fP 
-  then \fBCancel\fP, local changes can be applied without affecting further 
-  instances of mintty.
+  then \fBCancel\fP, local changes can be applied (and tested) without 
+  affecting further instances of mintty.
 
 In configuration files, settings are stored as \fINAME\fP=\fIVALUE\fP pairs,
 with one per line.  By default, they are read from \fI/etc/minttyrc\fP and
@@ -532,6 +551,18 @@ Configuration changes are saved to the last writable file specified with
 \fB-c\fP/\fB--config\fP, or \fI~/.minttyrc\fP if none is given.
 Individual settings can also be specified on the command line using the 
 \fB-o\fP/\fB--option\fP.
+
+\fINote:\fP Many string values in the \fIminttyrc\fP files, especially those 
+referring to file names or Windows items, are \fBUnicode-enabled\fP, 
+meaning they are expected to be UTF-8-encoded in the configuration 
+file independently of the encoding the terminal runs in; as a fallback, 
+if the configuration value is not valid UTF-8, it is interpreted in 
+the system ANSI encoding.
+(This does not apply to the same configuration settings when given on the 
+command-line.)
+.br
+Unicode-enabled settings: BellFile, ThemeFile, Title, ExitTitle, Icon, Log, 
+Font, Printer, Answerback, Class, AppID, AppName, AppLaunchCmd.
 
 Be careful when running multiple instances of mintty. If options are saved 
 from different instances, obviously they can overwrite each other; if 
@@ -553,9 +584,11 @@ Settings affecting mintty's appearance.
 .TP
 \fBColours\fP
 Clicking on one of the buttons here opens the colour selection dialog.
-In the settings, colours are represented as comma-separated RGB triples
-with decimal 8-bit values ranging from 0 to 255. X-style hexadecimal
-colour specifications such as #RRGGBB or rgb:RR/GG/BB can be used as well.
+.br
+In the settings (.minttyrc or command-line options), colours are 
+represented as comma-separated RGB triples with decimal 8-bit values 
+ranging from 0 to 255. X-style hexadecimal colour specifications such 
+as #RRGGBB, rgb:RR/GG/BB or rgb:RRRR/GGGG/BBBB can be used as well.
 Also X11 color names are supported.
 .br
 \(en \fBForeground\fP (ForegroundColour=191,191,191)
@@ -563,6 +596,11 @@ Also X11 color names are supported.
 \(en \fBBackground\fP (BackgroundColour=0,0,0)
 .br
 \(en \fBCursor\fP (CursorColour=191,191,191)
+
+\(en \fBTheme\fP (ThemeFile=): 
+The popup offers theme files as stored in the resource directory 
+$HOME/.mintty/themes for selection as a colour scheme.
+The option can also be set to a filename (like D:/.../solarized-light.minttyrc).
 
 .TP
 \fBTransparency\fP (Transparency=off)
@@ -622,9 +660,27 @@ In the config file, this corresponds to the following entries:
 .br
 \(en \fBFont\fP (Font=Lucida Console)
 .br
-\(en \fBStyle\fP (FontIsBold=no)
+\(en \fBFont style\fP (FontWeight=400, FontIsBold=no)
 .br
 \(en \fBSize\fP (FontHeight=9)
+.br
+The font selection dialog also offers an \fBApply\fP button for 
+convenient testing how the selected font looks. Its function is the same 
+as the \fBApply\fP button of the Options dialog.
+
+Further settings can be given in the config file:
+.br
+\(en \fBFont boldness\fP (FontWeight=400): This is an implicit value after 
+selecting a font in the font selection menu, or can be specified in the 
+config file or on the command line for font selection. Typical weights 
+are \fBNormal\fP/\fBRegular\fP (FontWeight=400) and \fBBold\fP (FontWeight=700 
+or FontIsBold=yes) but if a font family has a different scheme or more than 
+2 font weights, the weight value can be used for more specific selection.
+.br
+\(en \fBShow "hidden" fonts\fP (ShowHiddenFonts=no)
+This hidden settings enables display of monospace fonts in the font selection 
+menu even if they are marked to Hide in the Windows Font settings (from the 
+Control Panel \(em Fonts folder).
 
 .TP
 \fBShow bold as font\fP (BoldAsFont=no)
@@ -868,11 +924,22 @@ Default height of the window, in character cells.
 
 .TP
 \fB\fP(RowSpacing=0)
-Additional row padding; RowSpacing=-1 works nicely with the Consolas fonts.
+Additional row padding.
+
+\fINote:\fP Mintty adjusts row spacing according to the font metrics, to 
+compensate for tight or tall spacing of some fonts (e.g. Consolas, FreeMono, Monaco).
+The RowSpacing value is added to that.
 
 .TP
 \fB\fP(ColSpacing=0)
 Additional column padding; ColSpacing=1 can avoid boldened glyphs being clipped.
+
+.TP
+\fB\fP(Padding=1)
+Window padding; margin between text and window border. The effective value 
+is limited by the character cell width (scaling with font zooming).
+A negative value indicates that always the character cell width shall be used,
+without fixed limit.
 
 .TP
 \fBCurrent size\fP
@@ -941,29 +1008,21 @@ is the default.
 
 .TP
 \fBAnswerback\fP (Answerback=)
-
 The answerback string is sent in response to the \fB^E\fP (ENQ) character.
 By default, this is empty.
 
 .TP
 \fBBell\fP
-The three checkboxes here determine what effects the bell character \fB^G\fP
-has.  Only taskbar highlighting is enabled by default.
-.br
-\(en \fBSound\fP (BellSound=no): Play the system's default beep sound.
-.br
-\(en \fBFlash\fP (BellFlash=no): Briefly invert the foreground and background
-colours.
-.br
-\(en \fBHighlight in taskbar\fP (BellTaskbar=yes): Change the colour of mintty's
-taskbar entry if the mintty window is not active.
-
-Further configuration options are currently available for 
-\fI/etc/minttyrc\fP and \fI~/.minttyrc\fP or as \fB-o\fP command line option only:
-.br
-\(en\fB\fP (BellType=0): Preferred system sound, values:
+The options here determine what effects the bell character \fB^G\fP has.
+Default beep and taskbar highlighting are enabled by default.
+Mintty can also play wave sounds or frequency beeps.
 .RS
+\(en \fBBell system sound\fP (BellType=1): Preferred system sound, values:
 .RS
+\fB-1\fP : Simple Beep
+.br
+\fB0\fP : No Beep (overrides BellFile and BellFreq)
+.br
 \fB1\fP : Default Beep
 .br
 \fB2\fP : Critical Stop
@@ -974,6 +1033,23 @@ Further configuration options are currently available for
 .br
 \fB5\fP : Asterisk
 .RE
+\(en \fBWave\fP (BellFile=): 
+The popup offers wave files as stored in the resource directory 
+$HOME/.mintty/sounds for selection. The option can also be set 
+to a filename (like D:/.../soundfile.wav).
+This setting overrides the Bell system sound except No Beep.
+.br
+\(en \fBPlay\fP: The button plays the selected sound for testing.
+The sound is also played when it is changed.
+.br
+\(en \fBFlash\fP (BellFlash=no): Briefly invert the foreground and background
+colours.
+.br
+\(en \fBHighlight in taskbar\fP (BellTaskbar=yes): Change the colour of mintty's
+taskbar entry if the mintty window is not active.
+
+A simple \fBfrequency beep\fP can be configured in the configuration file 
+or on the command line:
 .br
 \(en\fB\fP (BellFreq=0): Beep sound frequency (overrides system sounds).
 .br
@@ -982,11 +1058,15 @@ Further configuration options are currently available for
 
 .TP
 \fBPrinter\fP (Printer=)
-The ANSI standard defines control sequences for sending text to a printer,
+The ANSI standard defines control sequences ("Media Copy") for sending 
+text to a printer,
 which are used by some terminal applications such as the mail reader
 \fBpine\fP.
 The Windows printer to send such text to can be selected here.
 By default, printing is disabled.
+If printing gets disabled in the Options menu, an active print connection 
+will be ended; if the printer is changed, an active print connection 
+will be continued with the previous printer.
 
 .TP
 \fBPrompt about running processes on close\fP (ConfirmExit=yes)
@@ -1023,7 +1103,10 @@ The \fBIcon\fP setting with format \fIFILE\fP[\fB,\fIINDEX\fR] allows to load
 the window icon from an executable, DLL, or icon file.
 The optional comma-separated index can be used to select a particular icon in
 a file with multiple icons.
-If the setting is empty, as it is by default, mintty's program icon is used.
+
+If the setting is empty, as it is by default, mintty's program icon is used, 
+unless mintty was invoked from a desktop shortcut in which case it uses 
+the shortcut icon.
 
 For interaction problems of icon, shortcut, and the Windows taskbar, 
 see the note for the -i option above.
@@ -1032,6 +1115,7 @@ see the note for the -i option above.
 \fBLog file\fP (Log=)
 The \fBLog\fP setting can be used to specify a log file that all output is
 copied into.  If it is empty, as it is by default, no logging is done.
+If it contains \fB%d\fP it will be substituted with the process ID.
 See also the \fIscript\fP(1) utility for a more flexible logging solution.
 
 .TP
@@ -1092,11 +1176,11 @@ the shortcut itself should also get attached with the same AppId.
 \fIExplanation:\fP Note that Windows shortcut files have their own AppID.
 Hence, if an AppID is specified in the mintty settings, but not on a 
 taskbar-pinned shortcut for invoking mintty, clicking the pinned 
-shortcut will result in a separate taskbar item for the new mintty 
-window, rather than being grouped with the shortcut.
+shortcut will result in a separate taskbar item for the new mintty window, 
+rather than being grouped with the shortcut.
 To avoid this, the shortcut's AppID has to be set to the same string, 
-which can be done using the \fBwin7appid\fP utility available from
-\fIhttp://win7appid.googlecode.com\fP.
+which can be done using the \fBWin7AppId\fP utility available cloned in 
+the mintty utils repository \fIhttps://github.com/mintty/utils\fP.
 
 .TP
 \fBApplication Taskbar Shortcut Title\fP (AppName=)
@@ -1105,27 +1189,31 @@ the title is kept only if it was made persistent as described for
 AppLaunchCmd.
 
 .TP
-\fBApplication Taskbar Shortcut Launch CommandTitle\fP (AppLaunchCmd=)
+\fBApplication Taskbar Shortcut Launch Command\fP (AppLaunchCmd=)
 The command to use if a shortcut pinned to the Windows 7 taskbar is invoked.
 This is only effective if combined with an AppName option and the 
 command-line option --store-taskbar-properties to make it persistent.
-It should also be combined with an explicit AppID (mintty will otherwise 
-generate an AppID but that may not be desired).
+It should also be combined with an explicit and unique AppID.
 
-Note: The command must be given in Windows pathname syntax (e.g. 
+\fINote:\fP The command must be given in Windows pathname syntax (e.g. 
 AppLaunchCmd='C:\\cygwin\\bin\\mintty -T mytitle -').
 
-Note: An explicit icon supplied with the -i option can also be stored with 
-the persistent properties; note, however, that for this purpose, it 
-must be given in Windows pathname syntax and it must include a 
+\fINote:\fP An explicit icon supplied with the -i option can also be stored 
+with the persistent properties; note, however, that for this purpose, 
+it must be given in Windows pathname syntax and it must include a 
 resource index; also, for consistent appearance, another -i option 
-referring to the same icon should be included in the AppLaunchCmd.
+referring to the same icon should be included in the AppLaunchCmd 
+(if the mintty invocation does not include an icon parameter but was 
+started from a desktop shortcut, the icon in the AppLaunchCmd should 
+be consistent with that one, respectively).
 
 Example:
 mintty -o AppID=Mintty.Pintest.1 -o AppName=Mintty.Pintest -o AppLaunchCmd="C:\\cygwin\\bin\\mintty -i /cygdrive/c/Windows/System32/calc.exe -" -i C:\\Windows\\System32\\calc.exe,0 --store-taskbar-properties -
 
 \fBWarning:\fP Once made persistent, the stored properties associated with 
 a specific AppID cannot be removed or even modified again with normal means.
+For this reason, it is advisable to use temporary AppIDs for testing 
+(like MyMintty.1).
 
 .TP
 \fBWord selection characters\fP (WordChars=)
@@ -1146,22 +1234,29 @@ This string can list characters that are to be excluded from word selection.
 \fBSpecial key remapping\fP
 These options can attach a specific string to some special keys.
 If the string is a number, a corresponding Escape sequence will be generated, 
-applying Shift/Ctrl/Alt modifiers as to function and keypad keys.
-For example, Key_Break=2 would turn the Break key into an Insert key.
+applying Shift/Ctrl/Alt modifiers, following the pattern of function keys.
 .br
-\(en \fBKey_PrintScreen\fP=
+If the string value contains a single control character, some generic 
+Alt or Shift modification is applied.
+For \fBPause\fP and \fBBreak\fP, control characters are the default values, 
+they can be cleared with an empty assignment. For empty values, the default 
+layout of the keyboard is applied.
 .br
-\(en \fBKey_Pause\fP=
+\(en \fBKey_Pause\fP=^] \fI(Ctrl+])\fP
 .br
-\(en \fBKey_Break\fP=
+\(en \fBKey_Break\fP=^\\ \fI(Ctrl+\\)\fP
 .br
 \(en \fBKey_Menu\fP=
 .br
 \(en \fBKey_ScrollLock\fP=
+.br
+\(en \fBKey_PrintScreen\fP=
 
-.TP
-\fBPause key remapping\fP (Pause=)
-This option can attach a specific string to the Pause key. See Break key remapping.
+Examples:
+.br
+Key_Break=2 would turn the Break key into an Insert key
+.br
+Key_Menu=29 would make the Menu key send the same escape sequence as in xterm
 
 .TP
 \fBUse system colours\fP (UseSystemColours=no)
@@ -1183,8 +1278,10 @@ colour number 262.
 \fBANSI colours\fP
 These are the 16 ANSI colour settings along with their default values.
 Colours are represented as comma-separated RGB triples with decimal 8-bit values
-ranging from 0 to 255. X-style hexadecimal colour specifications such as #RRGGBB
-or rgb:RR/GG/BB can be used as well. Also X11 color names are supported.
+ranging from 0 to 255. 
+X-style hexadecimal colour specifications such as #RRGGBB, 
+rgb:RR/GG/BB or rgb:RRRR/GGGG/BBBB can be used as well. 
+Also X11 color names are supported.
 .br
 \(en \fBBlack\fP=0,0,0
 .br

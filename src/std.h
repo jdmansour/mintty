@@ -42,6 +42,7 @@ int vasprintf(char **, const char *, va_list);
 char *asform(const char *fmt, ...);
 
 #define WINVER 0x500  // Windows 2000
+//#define WINVER 0x601  // Windows 7
 #define _WIN32_WINNT WINVER
 #define _WIN32_IE WINVER
 
@@ -82,6 +83,7 @@ typedef const wchar *wstring;
 static inline void delete(const void *p) { free((void *)p); }
 
 void strset(string *sp, string s);
+void wstrset(wstring *sp, wstring s);
 
 #define when break; case
 #define or : case

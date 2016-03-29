@@ -4,11 +4,13 @@
 # - zip: Zip for standalone release.
 # - clean: Delete generated files.
 
+# make parameter CCOPT, e.g. for make CCOPT=-Wno-unused
+
 #############################################################################
 # Variables intended for setting on the make command line.
 # - RELEASE: release number for packaging
 # - TARGET: target triple for cross compiling
-#	values: i686-pc-cygwin, x86_64-pc-cygwin, i686-pc-msys
+#	values: i686-pc-cygwin, x86_64-pc-cygwin, i686-pc-msys, x86_64-pc-msys
 # - DEBUG: define to enable debug build
 # - DMALLOC: define to enable the dmalloc heap debugging library
 #
@@ -42,10 +44,15 @@ else ifeq ($(TARGET), x86_64-pc-cygwin)
   cygport_opts := --64
   zip_files := ../docs/readme.html ../scripts/create_shortcut.js
 else ifeq ($(TARGET), i686-pc-msys)
-  platform := msys
+  MSYS=$(shell uname -r | sed -e 's,\..*,,')
+  ifeq ("$(MSYS)", "1")
+    platform := msys
+  else
+    platform := msys32
+  endif
   zip_files := ../docs/readme-msys.html
 else ifeq ($(TARGET), x86_64-pc-msys)
-  platform := msys
+  platform := msys64
   zip_files := ../docs/readme-msys.html
 else
   $(error Target '$(TARGET)' not supported)
@@ -80,7 +87,7 @@ ifeq ($(shell VER=`$(CC) -dumpversion`; expr $${VER%.*} '>=' 4.5), 1)
 endif
 
 LDFLAGS := -L$(shell $(CC) -print-file-name=w32api) -static-libgcc
-LDLIBS := -mwindows -lcomctl32 -limm32 -lwinspool -lole32 -luuid -lmsimg32
+LDLIBS := -mwindows -lcomctl32 -limm32 -lwinmm -lwinspool -lole32 -luuid -lmsimg32
 
 ifdef DEBUG
   CFLAGS += -g
@@ -103,11 +110,14 @@ all:	bin
 DEPOPT=-MMD -MP
 #DEPOPT=
 
+CCOPT=
+CCFLAGS:=$(CFLAGS) $(CCOPT)
+
 %.o: %.c
-	$(CC) -c $(DEPOPT) $(CPPFLAGS) $(CFLAGS) $<
+	$(CC) -c $(DEPOPT) $(CPPFLAGS) $(CCFLAGS) $<
 
 $(BINDIR)/%.o: %.c
-	$(CC) -c $(DEPOPT) $(CPPFLAGS) $(CFLAGS) $< -o $(BINDIR)/$*.o
+	$(CC) -c $(DEPOPT) $(CPPFLAGS) $(CCFLAGS) $< -o $(BINDIR)/$*.o
 
 %.o: %.rc %.mft
 	$(RC) --preprocessor '$(CC) -E -xc -DRC_INVOKED $(DEPOPT) $(CPPFLAGS)' $< $*.o
@@ -120,7 +130,7 @@ exe := $(NAME).exe
 exe: $(exe)
 $(exe): $(objs)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
-	-du -b $@
+	#-du -b $@
 
 bin := $(BINDIR)/$(NAME).exe
 bin: $(BINDIR) $(bin)
@@ -129,8 +139,10 @@ $(BINDIR):
 $(bin): $(bins)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 	cp -f $@ $(BINFOLDER)/		# for 'dobin' install in .cygport
-	-test -f `basename $@` && cp -f $@ ./	# support simpler debugging
-	-type du && du -b $@ || true
+	# support simpler debugging:
+	-test -f `basename $@` && cp -fp $@ ./ || true
+	# report size of exe:
+	#-type du && du -b $@ || true
 
 #-include $(wildcard *.d)
 -include $(wildcard $(BINDIR)/*.d)
@@ -170,7 +182,7 @@ zip: $(zip)
 $(zip): $(exe) $(zip_files)
 	mkdir -p $(DIST)
 	zip -9 -j $@ $^
-	-du -b $@
+	#-du -b $@
 
 pdf := $(DIST)/$(name_ver).pdf
 pdf: $(pdf)
@@ -200,9 +212,10 @@ checkresource:
 
 # check whether sources are free of remaining debugging code
 checksrc:
-	if egrep -a -e "^(printf|#define debug)" *.[hc]; then false; fi
+	if egrep -a -e "^(f*printf|#define debug)" *.[hc]; then false; fi
 	if egrep -e "^(if|do|for|while) *[({]" *.c; then false; fi
 	if egrep -e "\((false|0) *&" *.c; then false; fi
+	if egrep -e "& 0($|[^x])" *.c; then false; fi
 
 #############################################################################
 # development and debug targets
@@ -222,9 +235,13 @@ vk_names.t:	# Windows Virtual Key Code names, only for debugging
 #		{0x09, "VK_TAB"},
 	sed -e 's/^#define \(VK_[^ ]*\) \(0x[0-9A-Fa-f]*\)$$/	{\2, "\1"},/' -e t -e d /usr/include/w32api/winuser.h > vk_names.t
 
+winids.t:	winids.h
+	sed -e 's/#define *\(IDM_[^ ]*\).*/	{\1, "\1"},/' -e t -e d winids.h > winids.t
+
 target:
-	echo $(TARGET)
-	echo $(BINDIR)
+	echo TARGET $(TARGET)
+	echo platform $(platform)
+	echo BINDIR $(BINDIR)
 	echo $(bins)
 
 getappinfo=$(shell echo "$(1)" ; echo "$(1)" | cpp -P $(CPPFLAGS) --include appinfo.h)

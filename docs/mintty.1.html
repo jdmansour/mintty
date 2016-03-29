@@ -1,5 +1,5 @@
 <!-- Creator     : groff version 1.22.3 -->
-<!-- CreationDate: Thu Nov 12 17:56:35 2015 -->
+<!-- CreationDate: Fri Mar 18 23:16:28 2016 -->
 <!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
 "http://www.w3.org/TR/html4/loose.dtd">
 <html>
@@ -103,10 +103,11 @@ specified configuration file, in addition to
 <i>/etc/minttyrc</i> and <i>~/.minttyrc</i>. The file is not
 taken into account for saving configuration changes. This is
 useful to mix-in partial configuration variants,
-particularly colour schemes.</p>
+particularly colour schemes. However, <b>-o
+ThemeFile=</b><i>FILENAME</i> <b>may be preferable.</b></p>
 
-<p style="margin-left:11%;"><b>-e</b>, <b>--exec</b>
-<i>PROGRAM</i> [<i>ARG</i> ...]</p>
+<p style="margin-left:11%;"><b>-e, --exec</b>
+<i>PROGRAM</i> <b>[</b><i>ARG</i> <b>...]</b></p>
 
 <p style="margin-left:22%;">Execute the specified program
 in the terminal session and pass on any additional
@@ -151,15 +152,20 @@ About interaction problems of icon, shortcut, and the
 Windows taskbar: In a Windows desktop shortcut, to achieve
 consistent icon behaviour, the same icon should be specified
 in the shortcut properties (Change Icon...) and the mintty
-command line (Target:).</p>
+command line (Target:), or (beginning 2.2.3) no icon should
+be specified on the command line as mintty will then take
+the icon from the invoking shortcut, also resolving a
+leading Windows environment variable (like
+%SystemRoot%).</p>
 
 <p style="margin-left:11%;"><b>-l</b>, <b>--log</b>
 <i>FILE</i>|<b>-</b></p>
 
 <p style="margin-left:22%;">Copy all output into the
 specified log file, or standard output if a dash is given
-instead of a file name. (See also <i>script</i>(1) for a
-more flexible logging tool.)</p>
+instead of a file name. If FILE contains <b>%d</b> it will
+be substituted with the process ID. (See also
+<i>script</i>(1) for a more flexible logging tool.)</p>
 
 <p style="margin-left:11%;"><b>-o</b>, <b>--option</b>
 <i>NAME</i>=<i>VALUE</i></p>
@@ -197,8 +203,8 @@ relative to the monitor. <br>
 common multi-monitor address space as provided by
 Windows.</p>
 
-<p style="margin-left:22%; margin-top: 1em">Note: For
-another option to select the monitor for a new mintty
+<p style="margin-left:22%; margin-top: 1em"><i>Note:</i>
+For another option to select the monitor for a new mintty
 window, see the description of Alt+F2.</p>
 
 <p style="margin-left:11%;"><b>-s</b>, <b>--size</b>
@@ -260,9 +266,22 @@ to distinguish different mintty instances. The default is
 
 <p style="margin-left:22%;">Do not apply
 &quot;daemonizing&quot;. By default, mintty tries to detach
-itself from the invoking terminal in order to avoid disabled
-signal reception, and when cloning the window (Alt+F2) in
-order to avoid a remaining zombie process.</p>
+itself from the invoking terminal when started from a Cygwin
+Console in order to avoid disabled signal reception, and
+when cloning the window (Alt+F2) in order to avoid a
+remaining zombie process.</p>
+
+<p style="margin-left:11%;"><b>-D</b>, <b>--daemon</b></p>
+
+<p style="margin-left:22%;">Enforce
+&quot;daemonizing&quot;. By default, mintty tries to detach
+itself from the invoking terminal only as described above.
+With this option, it tries to detach always. This makes a
+difference if a Windows &quot;Shortcut key&quot; is
+configured in a Windows desktop shortcut for starting
+mintty. Without daemonizing, the shortcut key will focus an
+already running instance of mintty, with daemonizing it
+always starts a new instance.</p>
 
 <p style="margin-left:11%;"><b>-R</b>, <b>--Reportpos</b>
 <i>mode</i></p>
@@ -347,7 +366,8 @@ keyboard shortcut, or the middle mouse button combined with
 region is copied as &quot;rich text&quot; as well as normal
 text, which means it can be pasted with colours and
 formatting into applications that support it, e.g. word
-processors.</p>
+processors (&quot;true colour&quot; attributes are not
+supported).</p>
 
 <p style="margin-left:11%; margin-top: 1em">The window
 title can be copied using the <b>Copy Title</b> command in
@@ -369,13 +389,13 @@ pasted from the clipboard.</p>
 
 <p style="margin-left:11%; margin-top: 1em"><b>Opening
 files, directories and URLs</b> <br>
-Files, directories and URLs can be opened either by holding
-<b>Ctrl</b> while left-clicking on them, or by selecting
-them and choosing the <b>Open</b> command from the context
-menu. Please note that opening a file or directory with a
-relative path only works correctly if the path refers to the
-current working directory of the process invoked by
-mintty.</p>
+Files, directories, URLs and web addresses beginning with
+&quot;www.&quot; can be opened either by holding <b>Ctrl</b>
+while left-clicking on them, or by selecting them and
+choosing the <b>Open</b> command from the context menu.
+Please note that opening a file or directory with a relative
+path only works correctly if the path refers to the current
+working directory of the process invoked by mintty.</p>
 
 <p style="margin-left:11%; margin-top: 1em"><b>Font
 zoom</b> <br>
@@ -431,7 +451,8 @@ size</b> <br>
 If the window has been resized, it can be returned to the
 default size set in the Window pane of the options using the
 <b>Default size</b> command in the menu or the
-<b>Alt+F10</b> shortcut.</p>
+<b>Alt+F10</b> shortcut. <b>Shift+Alt+F10</b> also restores
+the font size to its default.</p>
 
 <p style="margin-left:11%; margin-top: 1em"><b>Reset</b>
 <br>
@@ -553,12 +574,16 @@ up <br>
 <p style="margin-left:11%;"><b>Window commands</b></p>
 
 <p style="margin-left:22%;">&ndash; <b>Alt+F2</b>: New
-(clone); see notes below <br>
+(clone window at current size); see notes below <br>
+&ndash; <b>Shift+Alt+F2</b>: New (clone window at configured
+size); see notes below <br>
 &ndash; <b>Alt+F3</b>: Search (in scrollback buffer) <br>
 &ndash; <b>Alt+F4</b>: Close <br>
 &ndash; <b>Alt+F8</b>: Reset <br>
 &ndash; <b>Alt+F10</b>: Default terminal size (rows/columns)
 <br>
+&ndash; <b>Shift+Alt+F10</b>: Default terminal size
+(rows/columns) and font size <br>
 &ndash; <b>Alt+F11</b> or <b>Alt+Enter</b>: Toggle full
 screen <br>
 &ndash; <b>Shift+Alt+F11</b> or <b>Shift+Alt+Enter</b>:
@@ -640,9 +665,9 @@ the dialog. <br>
 instance of mintty <br>
 but does not save them to the configuration file. So using
 <b>Apply</b> <br>
-then <b>Cancel</b>, local changes can be applied without
-affecting further <br>
-instances of mintty.</p>
+then <b>Cancel</b>, local changes can be applied (and
+tested) without <br>
+affecting further instances of mintty.</p>
 
 <p style="margin-left:11%; margin-top: 1em">In
 configuration files, settings are stored as
@@ -657,6 +682,19 @@ the last writable file specified with
 <b>-c</b>/<b>--config</b>, or <i>~/.minttyrc</i> if none is
 given. Individual settings can also be specified on the
 command line using the <b>-o</b>/<b>--option</b>.</p>
+
+<p style="margin-left:11%; margin-top: 1em"><i>Note:</i>
+Many string values in the <i>minttyrc</i> files, especially
+those referring to file names or Windows items, are
+<b>Unicode-enabled</b>, meaning they are expected to be
+UTF-8-encoded in the configuration file independently of the
+encoding the terminal runs in; as a fallback, if the
+configuration value is not valid UTF-8, it is interpreted in
+the system ANSI encoding. (This does not apply to the same
+configuration settings when given on the command-line.) <br>
+Unicode-enabled settings: BellFile, ThemeFile, Title,
+ExitTitle, Icon, Log, Font, Printer, Answerback, Class,
+AppID, AppName, AppLaunchCmd.</p>
 
 <p style="margin-left:11%; margin-top: 1em">Be careful when
 running multiple instances of mintty. If options are saved
@@ -682,16 +720,23 @@ Settings affecting mintty&rsquo;s appearance. <b><br>
 Colours</b></p>
 
 <p style="margin-left:22%;">Clicking on one of the buttons
-here opens the colour selection dialog. In the settings,
-colours are represented as comma-separated RGB triples with
-decimal 8-bit values ranging from 0 to 255. X-style
-hexadecimal colour specifications such as #RRGGBB or
-rgb:RR/GG/BB can be used as well. Also X11 color names are
-supported. <br>
+here opens the colour selection dialog. <br>
+In the settings (.minttyrc or command-line options), colours
+are represented as comma-separated RGB triples with decimal
+8-bit values ranging from 0 to 255. X-style hexadecimal
+colour specifications such as #RRGGBB, rgb:RR/GG/BB or
+rgb:RRRR/GGGG/BBBB can be used as well. Also X11 color names
+are supported. <br>
 &ndash; <b>Foreground</b> (ForegroundColour=191,191,191)
 <br>
 &ndash; <b>Background</b> (BackgroundColour=0,0,0) <br>
 &ndash; <b>Cursor</b> (CursorColour=191,191,191)</p>
+
+<p style="margin-left:22%; margin-top: 1em">&ndash;
+<b>Theme</b> (ThemeFile=): The popup offers theme files as
+stored in the resource directory $HOME/.mintty/themes for
+selection as a colour scheme. The option can also be set to
+a filename (like D:/.../solarized-light.minttyrc).</p>
 
 <p style="margin-left:11%;"><b>Transparency</b>
 (Transparency=off)</p>
@@ -756,8 +801,30 @@ be chosen. Font styles other than <b>Bold</b> are ignored.
 In the config file, this corresponds to the following
 entries: <br>
 &ndash; <b>Font</b> (Font=Lucida Console) <br>
-&ndash; <b>Style</b> (FontIsBold=no) <br>
-&ndash; <b>Size</b> (FontHeight=9)</p>
+&ndash; <b>Font style</b> (FontWeight=400, FontIsBold=no)
+<br>
+&ndash; <b>Size</b> (FontHeight=9) <br>
+The font selection dialog also offers an <b>Apply</b> button
+for convenient testing how the selected font looks. Its
+function is the same as the <b>Apply</b> button of the
+Options dialog.</p>
+
+<p style="margin-left:22%; margin-top: 1em">Further
+settings can be given in the config file: <br>
+&ndash; <b>Font boldness</b> (FontWeight=400): This is an
+implicit value after selecting a font in the font selection
+menu, or can be specified in the config file or on the
+command line for font selection. Typical weights are
+<b>Normal</b>/<b>Regular</b> (FontWeight=400) and
+<b>Bold</b> (FontWeight=700 or FontIsBold=yes) but if a font
+family has a different scheme or more than 2 font weights,
+the weight value can be used for more specific selection.
+<br>
+&ndash; <b>Show &quot;hidden&quot; fonts</b>
+(ShowHiddenFonts=no) This hidden settings enables display of
+monospace fonts in the font selection menu even if they are
+marked to Hide in the Windows Font settings (from the
+Control Panel &mdash; Fonts folder).</p>
 
 <p style="margin-left:11%;"><b>Show bold as font</b>
 (BoldAsFont=no)</p>
@@ -1055,13 +1122,26 @@ in character cells.</p>
 
 <p style="margin-left:11%;">(RowSpacing=0)</p>
 
-<p style="margin-left:22%;">Additional row padding;
-RowSpacing=-1 works nicely with the Consolas fonts.</p>
+<p style="margin-left:22%;">Additional row padding.</p>
+
+<p style="margin-left:22%; margin-top: 1em"><i>Note:</i>
+Mintty adjusts row spacing according to the font metrics, to
+compensate for tight or tall spacing of some fonts (e.g.
+Consolas, FreeMono, Monaco). The RowSpacing value is added
+to that.</p>
 
 <p style="margin-left:11%;">(ColSpacing=0)</p>
 
 <p style="margin-left:22%;">Additional column padding;
 ColSpacing=1 can avoid boldened glyphs being clipped.</p>
+
+<p style="margin-left:11%;">(Padding=1)</p>
+
+<p style="margin-left:22%;">Window padding; margin between
+text and window border. The effective value is limited by
+the character cell width (scaling with font zooming). A
+negative value indicates that always the character cell
+width shall be used, without fixed limit.</p>
 
 <p style="margin-left:11%;"><b>Current size</b></p>
 
@@ -1140,9 +1220,9 @@ which is why plain <b>xterm</b> is the default.</p>
 <p style="margin-left:11%;"><b>Answerback</b>
 (Answerback=)</p>
 
-<p style="margin-left:22%; margin-top: 1em">The answerback
-string is sent in response to the <b>^E</b> (ENQ) character.
-By default, this is empty.</p>
+<p style="margin-left:22%;">The answerback string is sent
+in response to the <b>^E</b> (ENQ) character. By default,
+this is empty.</p>
 
 <table width="100%" border="0" rules="none" frame="void"
        cellspacing="0" cellpadding="0">
@@ -1156,44 +1236,56 @@ By default, this is empty.</p>
 <td width="78%">
 
 
-<p>The three checkboxes here determine what effects the
-bell character <b>^G</b> has. Only taskbar highlighting is
-enabled by default.</p></td></tr>
+<p>The options here determine what effects the bell
+character <b>^G</b> has. Default beep and taskbar
+highlighting are enabled by default. Mintty can also play
+wave sounds or frequency beeps.</p></td></tr>
 </table>
 
-<p style="margin-left:22%;">&ndash; <b>Sound</b>
-(BellSound=no): Play the system&rsquo;s default beep sound.
-<br>
+<p style="margin-left:22%;">&ndash; <b>Bell system
+sound</b> (BellType=1): Preferred system sound, values:</p>
+
+<p style="margin-left:32%;"><b>-1</b> : Simple Beep <b><br>
+0</b> : No Beep (overrides BellFile and BellFreq) <b><br>
+1</b> : Default Beep <b><br>
+2</b> : Critical Stop <b><br>
+3</b> : Question <b><br>
+4</b> : Exclamation <b><br>
+5</b> : Asterisk</p>
+
+<p style="margin-left:22%;">&ndash; <b>Wave</b>
+(BellFile=): The popup offers wave files as stored in the
+resource directory $HOME/.mintty/sounds for selection. The
+option can also be set to a filename (like
+D:/.../soundfile.wav). This setting overrides the Bell
+system sound except No Beep. <br>
+&ndash; <b>Play</b>: The button plays the selected sound for
+testing. The sound is also played when it is changed. <br>
 &ndash; <b>Flash</b> (BellFlash=no): Briefly invert the
 foreground and background colours. <br>
 &ndash; <b>Highlight in taskbar</b> (BellTaskbar=yes):
 Change the colour of mintty&rsquo;s taskbar entry if the
 mintty window is not active.</p>
 
-<p style="margin-left:22%; margin-top: 1em">Further
-configuration options are currently available for
-<i>/etc/minttyrc</i> and <i>~/.minttyrc</i> or as <b>-o</b>
-command line option only: <br>
-&ndash; (BellType=0): Preferred system sound, values:</p>
-
-<p style="margin-left:32%;"><b>1</b> : Default Beep <b><br>
-2</b> : Critical Stop <b><br>
-3</b> : Question <b><br>
-4</b> : Exclamation <b><br>
-5</b> : Asterisk</p>
-
-<p style="margin-left:22%;">&ndash; (BellFreq=0): Beep
-sound frequency (overrides system sounds). <br>
+<p style="margin-left:22%; margin-top: 1em">A simple
+<b>frequency beep</b> can be configured in the configuration
+file or on the command line: <br>
+&ndash; (BellFreq=0): Beep sound frequency (overrides system
+sounds). <br>
 &ndash; (BellLen=400): Beep sound length (applies to
 frequency beep).</p>
 
 <p style="margin-left:11%;"><b>Printer</b> (Printer=)</p>
 
 <p style="margin-left:22%;">The ANSI standard defines
-control sequences for sending text to a printer, which are
-used by some terminal applications such as the mail reader
-<b>pine</b>. The Windows printer to send such text to can be
-selected here. By default, printing is disabled.</p>
+control sequences (&quot;Media Copy&quot;) for sending text
+to a printer, which are used by some terminal applications
+such as the mail reader <b>pine</b>. The Windows printer to
+send such text to can be selected here. By default, printing
+is disabled. If printing gets disabled in the Options menu,
+an active print connection will be ended; if the printer is
+changed, an active print connection will be continued with
+the previous printer.</p>
 
 <p style="margin-left:11%;"><b>Prompt about running
 processes on close</b> (ConfirmExit=yes)</p>
@@ -1232,9 +1324,12 @@ signal indicating a runtime error. <br>
 format <i>FILE</i>[<b>,</b><i>INDEX</i>] allows to load the
 window icon from an executable, DLL, or icon file. The
 optional comma-separated index can be used to select a
-particular icon in a file with multiple icons. If the
-setting is empty, as it is by default, mintty&rsquo;s
-program icon is used.</p>
+particular icon in a file with multiple icons.</p>
+
+<p style="margin-left:22%; margin-top: 1em">If the setting
+is empty, as it is by default, mintty&rsquo;s program icon
+is used, unless mintty was invoked from a desktop shortcut
+in which case it uses the shortcut icon.</p>
 
 <p style="margin-left:22%; margin-top: 1em">For interaction
 problems of icon, shortcut, and the Windows taskbar, see the
@@ -1244,9 +1339,10 @@ note for the -i option above.</p>
 
 <p style="margin-left:22%;">The <b>Log</b> setting can be
 used to specify a log file that all output is copied into.
-If it is empty, as it is by default, no logging is done. See
-also the <i>script</i>(1) utility for a more flexible
-logging solution.</p>
+If it is empty, as it is by default, no logging is done. If
+it contains <b>%d</b> it will be substituted with the
+process ID. See also the <i>script</i>(1) utility for a more
+flexible logging solution.</p>
 
 <p style="margin-left:11%;"><b>Window title</b>
 (Title=)</p>
@@ -1325,8 +1421,9 @@ clicking the pinned shortcut will result in a separate
 taskbar item for the new mintty window, rather than being
 grouped with the shortcut. To avoid this, the
 shortcut&rsquo;s AppID has to be set to the same string,
-which can be done using the <b>win7appid</b> utility
-available from <i>http://win7appid.googlecode.com</i>.</p>
+which can be done using the <b>Win7AppId</b> utility
+available cloned in the mintty utils repository
+<i>https://github.com/mintty/utils</i>.</p>
 
 <p style="margin-left:11%;"><b>Application Taskbar Shortcut
 Title</b> (AppName=)</p>
@@ -1337,28 +1434,31 @@ kept only if it was made persistent as described for
 AppLaunchCmd.</p>
 
 <p style="margin-left:11%;"><b>Application Taskbar Shortcut
-Launch CommandTitle</b> (AppLaunchCmd=)</p>
+Launch Command</b> (AppLaunchCmd=)</p>
 
 <p style="margin-left:22%;">The command to use if a
 shortcut pinned to the Windows 7 taskbar is invoked. This is
 only effective if combined with an AppName option and the
 command-line option --store-taskbar-properties to make it
-persistent. It should also be combined with an explicit
-AppID (mintty will otherwise generate an AppID but that may
-not be desired).</p>
+persistent. It should also be combined with an explicit and
+unique AppID.</p>
 
-<p style="margin-left:22%; margin-top: 1em">Note: The
-command must be given in Windows pathname syntax (e.g.
+<p style="margin-left:22%; margin-top: 1em"><i>Note:</i>
+The command must be given in Windows pathname syntax (e.g.
 AppLaunchCmd=&rsquo;C:\cygwin\bin\mintty -T mytitle
 -&rsquo;).</p>
 
-<p style="margin-left:22%; margin-top: 1em">Note: An
+<p style="margin-left:22%; margin-top: 1em"><i>Note:</i> An
 explicit icon supplied with the -i option can also be stored
 with the persistent properties; note, however, that for this
 purpose, it must be given in Windows pathname syntax and it
 must include a resource index; also, for consistent
 appearance, another -i option referring to the same icon
-should be included in the AppLaunchCmd.</p>
+should be included in the AppLaunchCmd (if the mintty
+invocation does not include an icon parameter but was
+started from a desktop shortcut, the icon in the
+AppLaunchCmd should be consistent with that one,
+respectively).</p>
 
 <p style="margin-left:22%; margin-top: 1em">Example: mintty
 -o AppID=Mintty.Pintest.1 -o AppName=Mintty.Pintest -o
@@ -1371,7 +1471,8 @@ C:\Windows\System32\calc.exe,0 --store-taskbar-properties
 <p style="margin-left:22%; margin-top: 1em"><b>Warning:</b>
 Once made persistent, the stored properties associated with
 a specific AppID cannot be removed or even modified again
-with normal means.</p>
+with normal means. For this reason, it is advisable to use
+temporary AppIDs for testing (like MyMintty.1).</p>
 
 <p style="margin-left:11%;"><b>Word selection
 characters</b> (WordChars=)</p>
@@ -1394,22 +1495,30 @@ characters</b> (WordCharsExcl=)</p>
 <p style="margin-left:22%;">This string can list characters
 that are to be excluded from word selection.</p>
 
-<p style="margin-left:11%;"><b>Break key remapping</b>
-(Break=)</p>
+<p style="margin-left:11%;"><b>Special key
+remapping</b></p>
 
-<p style="margin-left:22%;">This option can attach a
-specific string to the Break key. If the string is a number,
-a corresponding Escape sequence will be generated, applying
-Shift/Ctrl/Alt modifiers as to function and keypad keys. For
-example, Break=2 would effectively turn the Break key into
-an Insert key.</p>
+<p style="margin-left:22%;">These options can attach a
+specific string to some special keys. If the string is a
+number, a corresponding Escape sequence will be generated,
+applying Shift/Ctrl/Alt modifiers, following the pattern of
+function keys. <br>
+If the string value contains a single control character,
+some generic Alt or Shift modification is applied. For
+<b>Pause</b> and <b>Break</b>, control characters are the
+default values, they can be cleared with an empty
+assignment. For empty values, the default layout of the
+keyboard is applied. <br>
+&ndash; <b>Key_Pause</b>=^] <i>(Ctrl+])</i> <br>
+&ndash; <b>Key_Break</b>=^\ <i>(Ctrl+\)</i> <br>
+&ndash; <b>Key_Menu</b>= <br>
+&ndash; <b>Key_ScrollLock</b>= <br>
+&ndash; <b>Key_PrintScreen</b>=</p>
 
-<p style="margin-left:11%;"><b>Pause key remapping</b>
-(Pause=)</p>
-
-<p style="margin-left:22%;">This option can attach a
-specific string to the Pause key. See Break key
-remapping.</p>
+<p style="margin-left:22%; margin-top: 1em">Examples: <br>
+Key_Break=2 would turn the Break key into an Insert key <br>
+Key_Menu=29 would make the Menu key send the same escape
+sequence as in xterm</p>
 
 <p style="margin-left:11%;"><b>Use system colours</b>
 (UseSystemColours=no)</p>
@@ -1439,8 +1548,9 @@ OSC 4 control sequence with colour number 262.</p>
 settings along with their default values. Colours are
 represented as comma-separated RGB triples with decimal
 8-bit values ranging from 0 to 255. X-style hexadecimal
-colour specifications such as #RRGGBB or rgb:RR/GG/BB can be
-used as well. Also X11 color names are supported. <br>
+colour specifications such as #RRGGBB, rgb:RR/GG/BB or
+rgb:RRRR/GGGG/BBBB can be used as well. Also X11 color names
+are supported. <br>
 &ndash; <b>Black</b>=0,0,0 <br>
 &ndash; <b>Red</b>=191,0,0 <br>
 &ndash; <b>Green</b>=0,191,0 <br>

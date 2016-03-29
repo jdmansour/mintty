@@ -52,7 +52,7 @@ win_open(wstring wpath)
   wstring p = wpath;
   while (iswalpha(*p)) p++;
 
-  if (*wpath == '\\' || *p == ':') {
+  if (*wpath == '\\' || *p == ':' || wcsncmp(L"www.", wpath, 4) == 0) {
     // Looks like it's a Windows path or URI
     shell_exec(wpath);
   }
@@ -118,11 +118,20 @@ win_copy(const wchar *data, uint *attrs, int len)
       MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS,
                           (char[]){i}, 1, unitab + i, 1);
 
-    rtfsize = 100 + strlen(cfg.font.name);
+    char * rtffontname = newn(char, wcslen(cfg.font.name) * 9 + 1);
+    char * rtffnpoi = rtffontname;
+    for (uint i = 0; i < wcslen(cfg.font.name); i++)
+      if (!(cfg.font.name[i] & 0xFF80) && !strchr("\\;{}", cfg.font.name[i]))
+        *rtffnpoi++ = cfg.font.name[i];
+      else
+        rtffnpoi += sprintf(rtffnpoi, "\\u%d '", cfg.font.name[i]);
+    *rtffnpoi = '\0';
+    rtfsize = 100 + strlen(rtffontname);
     rtf = newn(char, rtfsize);
     rtflen = sprintf(rtf,
       "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0\\fmodern %s;}}\\f0\\fs%d",
-      cfg.font.name, cfg.font.size * 2);
+      rtffontname, cfg.font.size * 2);
+    free(rtffontname);
 
    /*
     * Add colour palette
@@ -131,7 +140,7 @@ win_copy(const wchar *data, uint *attrs, int len)
 
    /*
     * First - Determine all colours in use
-    *    o  Foregound and background colours share the same palette
+    *    o  Foreground and background colours share the same palette
     */
     memset(palette, 0, sizeof (palette));
     for (int i = 0; i < (len - 1); i++) {
@@ -439,18 +448,10 @@ paste_hdrop(HDROP drop)
   uint n = DragQueryFileW(drop, -1, 0, 0);
   for (uint i = 0; i < n; i++) {
 
-#if CYGWIN_VERSION_DLL_MAJOR >= 1007
     uint wfn_len = DragQueryFileW(drop, i, 0, 0);
     wchar wfn[wfn_len + 1];
     DragQueryFileW(drop, i, wfn, wfn_len + 1);
-    char *fn = cygwin_create_path(CCP_WIN_W_TO_POSIX, wfn);
-#else
-    uint wfn_len = DragQueryFileA(drop, i, 0, 0);
-    char wfn[wfn_len + 1];
-    DragQueryFileA(drop, i, wfn, wfn_len + 1);
-    char *fn = newn(char, MAX_PATH);
-    cygwin_conv_to_full_posix_path(wfn, fn);
-#endif
+    char *fn = path_win_w_to_posix(wfn);
 
     bool has_tick = false, needs_quotes = false, needs_dollar = false;
     for (char *p = fn; *p && !needs_dollar; p++) {
@@ -596,19 +597,29 @@ static __stdcall HRESULT
 dt_drop(IDropTarget *this, IDataObject *obj,
         DWORD keys, POINTL pos, DWORD *effect_p)
 {
-  dt_drag_enter(this, obj, keys, pos, effect_p);
-  if (!effect_p)
-    return 0;
-  STGMEDIUM stgmed;
-  if (obj->lpVtbl->GetData(obj, &dt_format, &stgmed) != S_OK)
-    return 0;
-  HGLOBAL data = stgmed.hGlobal;
-  if (!data)
-    return 0;
-  switch (dt_format.cfFormat) {
-    when CF_TEXT: paste_text(stgmed.hGlobal);
-    when CF_UNICODETEXT: paste_unicode_text(data);
-    when CF_HDROP: paste_hdrop(data);
+  // check whether drag-and-drop target is the terminal window
+  // not the Options menu or any of its controls
+  POINT p = {.x = pos.x, .y = pos.y};
+  HWND h = WindowFromPoint(p);
+  if (h == wnd) {
+    dt_drag_enter(this, obj, keys, pos, effect_p);
+    if (!effect_p)
+      return 0;
+    STGMEDIUM stgmed;
+    if (obj->lpVtbl->GetData(obj, &dt_format, &stgmed) != S_OK)
+      return 0;
+    HGLOBAL data = stgmed.hGlobal;
+    if (!data)
+      return 0;
+    switch (dt_format.cfFormat) {
+      when CF_TEXT: paste_text(stgmed.hGlobal);
+      when CF_UNICODETEXT: paste_unicode_text(data);
+      when CF_HDROP: paste_hdrop(data);
+    }
+  }
+  else if (h && dt_format.cfFormat == CF_HDROP) {
+    // support filename drag-and-drop to certain input fields
+    //SendMessage(h, ...);
   }
   return 0;
 }

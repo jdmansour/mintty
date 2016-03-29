@@ -3,6 +3,11 @@
 // Based on code from PuTTY-0.60 by Simon Tatham and team.
 // Licensed under the terms of the GNU General Public License v3 or later.
 
+#define dont_debuglog
+#ifdef debuglog
+  FILE * mtlog = 0;
+#endif
+
 #define dont_debug_resize
 
 #include "winpriv.h"
@@ -16,6 +21,8 @@
 #include <locale.h>
 #include <getopt.h>
 #include <pwd.h>
+
+#include <mmsystem.h>  // PlaySound for MSys
 #include <shellapi.h>
 
 #include <sys/cygwin.h>
@@ -26,6 +33,10 @@
 #endif
 
 
+char * home;
+char * cmd;
+bool icon_is_from_shortcut = false;
+
 HINSTANCE inst;
 HWND wnd;
 HIMC imc;
@@ -34,7 +45,10 @@ static char **main_argv;
 static int main_argc;
 static ATOM class_atom;
 static bool invoked_from_shortcut = false;
+#if CYGWIN_VERSION_DLL_MAJOR >= 1005
 static bool invoked_with_appid = false;
+#endif
+
 
 static int extra_width, extra_height, norm_extra_width, norm_extra_height;
 
@@ -43,6 +57,7 @@ bool win_is_fullscreen;
 static bool go_fullscr_on_max;
 static bool resizing;
 static int zoom_token = 0;  // for heuristic handling of Shift zoom (#467, #476)
+static bool default_size_token = false;
 
 // Options
 static bool title_settable = true;
@@ -133,6 +148,7 @@ typedef enum _DWMWINDOWATTRIBUTE {
 
 static HRESULT (WINAPI * pDwmIsCompositionEnabled)(BOOL *) = 0;
 static HRESULT (WINAPI * pDwmExtendFrameIntoClientArea)(HWND, const MARGINS *) = 0;
+static HRESULT (WINAPI * pDwmEnableBlurBehindWindow)(HWND, void *) = 0;
 static HRESULT (WINAPI * pSetWindowCompositionAttribute)(HWND, WINCOMPATTR *) = 0;
 static HRESULT (WINAPI * pDwmSetWindowAttribute)(HWND, DWORD dwAttribute, LPCVOID pvAttribute,
   DWORD cbAttribute) = 0;
@@ -170,6 +186,8 @@ load_dwm_funcs(void)
       (void *)GetProcAddress(dwm, "DwmIsCompositionEnabled");
     pDwmExtendFrameIntoClientArea =
       (void *)GetProcAddress(dwm, "DwmExtendFrameIntoClientArea");
+    pDwmEnableBlurBehindWindow =
+      (void *)GetProcAddress(dwm, "DwmEnableBlurBehindWindow");
     pDwmSetWindowAttribute =
       (void *)GetProcAddress(dwm, "DwmSetWindowAttribute");
   }
@@ -265,14 +283,28 @@ win_copy_title(void)
 }
 
 void
-win_prefix_title(const char * prefix)
+win_prefix_title(const wstring prefix)
 {
   int len = GetWindowTextLengthW(wnd);
-  wchar ptitle[strlen(prefix) + len + 1];
-  int plen = cs_mbstowcs(ptitle, prefix, lengthof(ptitle));
+  int plen = wcslen(prefix);
+  wchar ptitle[plen + len + 1];
+  wcscpy(ptitle, prefix);
   wchar * title = & ptitle[plen];
   len = GetWindowTextW(wnd, title, len + 1);
   SetWindowTextW(wnd, ptitle);
+}
+
+void
+win_unprefix_title(const wstring prefix)
+{
+  int len = GetWindowTextLengthW(wnd);
+  wchar ptitle[len + 1];
+  GetWindowTextW(wnd, ptitle, len + 1);
+  int plen = wcslen(prefix);
+  if (!wcsncmp(ptitle, prefix, plen)) {
+    wchar * title = & ptitle[plen];
+    SetWindowTextW(wnd, title);
+  }
 }
 
 /*
@@ -607,6 +639,38 @@ win_is_blurbehind_available(void)
 }
 
 static void
+update_blur(void)
+{
+// This feature is disabled in config.c as it does not seem to work,
+// see https://github.com/mintty/mintty/issues/501
+  if (pDwmEnableBlurBehindWindow) {
+    bool blur =
+      cfg.transparency && cfg.blurred && !win_is_fullscreen &&
+      !(cfg.opaque_when_focused && term.has_focus);
+#define dont_use_dwmapi_h
+#ifdef use_dwmapi_h
+#warning dwmapi_include_shown_for_documentation
+#include <dwmapi.h>
+    DWM_BLURBEHIND bb;
+#else
+    struct {
+      DWORD dwFlags;
+      BOOL  fEnable;
+      HRGN  hRgnBlur;
+      BOOL  fTransitionOnMaximized;
+    } bb;
+#define DWM_BB_ENABLE 1
+#endif
+    bb.dwFlags = DWM_BB_ENABLE;
+    bb.fEnable = blur;
+    bb.hRgnBlur = NULL;
+    bb.fTransitionOnMaximized = FALSE;
+
+    pDwmEnableBlurBehindWindow(wnd, &bb);
+  }
+}
+
+static void
 update_glass(void)
 {
   bool enabled =
@@ -661,7 +725,7 @@ clear_fullscreen(void)
  /* Reinstate the window furniture. */
   LONG style = GetWindowLong(wnd, GWL_STYLE);
   if (border_style) {
-    if (strcmp (border_style, "void") != 0) {
+    if (strcmp(border_style, "void") != 0) {
       style |= WS_THICKFRAME;
     }
   }
@@ -759,22 +823,46 @@ flash_taskbar(bool enable)
  * Bell.
  */
 void
-win_bell(void)
+win_bell(config * conf)
 {
-  if (cfg.bell_sound || cfg.bell_type) {
-    if (cfg.bell_freq)
-      Beep(cfg.bell_freq, cfg.bell_len);
-    else {
-      // 0  MB_OK               Default Beep
-      // 1  MB_ICONSTOP         Critical Stop
-      // 2  MB_ICONQUESTION     Question
-      // 3  MB_ICONEXCLAMATION  Exclamation
-      // 4  MB_ICONASTERISK     Asterisk
-      // ?  0xFFFFFFFF          Simple Beep
-      MessageBeep((cfg.bell_type - 1) * 16);
+  if (conf->bell_sound || conf->bell_type) {
+    wchar * bell_file = (wchar *)conf->bell_file;
+    bool free_bell_file = false;
+    if (*bell_file && !wcschr(bell_file, L'/') && !wcschr(bell_file, L'\\')) {
+      string subfolder = ".mintty/sounds";
+      char rcdir[strlen(home) + strlen(subfolder) + 2];
+      sprintf(rcdir, "%s/%s", home, subfolder);
+      wchar * rcpat = path_posix_to_win_w(rcdir);
+      int len = wcslen(rcpat);
+      rcpat = renewn(rcpat, len + wcslen(bell_file) + 6);
+      rcpat[len++] = L'/';
+      wcscpy(&rcpat[len], bell_file);
+      len = wcslen(rcpat);
+      wcscpy(&rcpat[len], L".wav");
+      bell_file = rcpat;
+      free_bell_file = true;
     }
+    if (*bell_file && PlaySoundW(bell_file, NULL, SND_ASYNC | SND_FILENAME)) {
+      // played
+    }
+    else if (conf->bell_freq)
+      Beep(conf->bell_freq, conf->bell_len);
+    else if (conf->bell_type > 0) {
+      //  1 -> 0x00000000 MB_OK              Default Beep
+      //  2 -> 0x00000010 MB_ICONSTOP        Critical Stop
+      //  3 -> 0x00000020 MB_ICONQUESTION    Question
+      //  4 -> 0x00000030 MB_ICONEXCLAMATION Exclamation
+      //  5 -> 0x00000040 MB_ICONASTERISK    Asterisk
+      // -1 -> 0xFFFFFFFF                    Simple Beep
+      MessageBeep((conf->bell_type - 1) * 16);
+    } else if (conf->bell_type < 0)
+      MessageBeep(0xFFFFFFFF);
+
+    if (free_bell_file)
+      free(bell_file);
   }
-  if (cfg.bell_taskbar && !term.has_focus)
+
+  if (conf->bell_taskbar && !term.has_focus)
     flash_taskbar(true);
 }
 
@@ -782,6 +870,33 @@ void
 win_invalidate_all(void)
 {
   InvalidateRect(wnd, null, true);
+}
+
+static void
+win_adjust_borders()
+{
+  int term_width = font_width * cfg.cols;
+  int term_height = font_height * cfg.rows;
+  RECT cr = {0, 0, term_width + 2 * PADDING, term_height + 2 * PADDING};
+  RECT wr = cr;
+  LONG window_style = WS_OVERLAPPEDWINDOW;
+  if (border_style) {
+    if (strcmp(border_style, "void") == 0)
+      window_style &= ~(WS_CAPTION | WS_BORDER | WS_THICKFRAME);
+    else
+      window_style &= ~(WS_CAPTION | WS_BORDER);
+  }
+  AdjustWindowRect(&wr, window_style, false);
+  int width = wr.right - wr.left;
+  int height = wr.bottom - wr.top;
+
+  if (cfg.scrollbar)
+    width += GetSystemMetrics(SM_CXVSCROLL);
+
+  extra_width = width - (cr.right - cr.left);
+  extra_height = height - (cr.bottom - cr.top);
+  norm_extra_width = extra_width;
+  norm_extra_height = extra_height;
 }
 
 void
@@ -911,6 +1026,7 @@ update_transparency(void)
     SetLayeredWindowAttributes(wnd, 0, 255 - (uchar)trans, LWA_ALPHA);
   }
 
+  update_blur();
   update_glass();
 }
 
@@ -930,35 +1046,12 @@ win_update_scrollbar(void)
                SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 }
 
-void
-win_reconfig(void)
+static void
+font_cs_reconfig(bool font_changed)
 {
-  trace_resize(("--- win_reconfig\n"));
- /* Pass new config data to the terminal */
-  term_reconfig();
-
-  bool font_changed =
-    strcmp(new_cfg.font.name, cfg.font.name) ||
-    new_cfg.font.size != cfg.font.size ||
-    new_cfg.font.isbold != cfg.font.isbold ||
-    new_cfg.bold_as_font != cfg.bold_as_font ||
-    new_cfg.bold_as_colour != cfg.bold_as_colour ||
-    new_cfg.font_smoothing != cfg.font_smoothing;
-
-  if (new_cfg.fg_colour != cfg.fg_colour)
-    win_set_colour(FG_COLOUR_I, new_cfg.fg_colour);
-
-  if (new_cfg.bg_colour != cfg.bg_colour)
-    win_set_colour(BG_COLOUR_I, new_cfg.bg_colour);
-
-  if (new_cfg.cursor_colour != cfg.cursor_colour)
-    win_set_colour(CURSOR_COLOUR_I, new_cfg.cursor_colour);
-
-  /* Copy the new config and refresh everything */
-  copy_config(&cfg, &new_cfg);
   if (font_changed) {
     win_init_fonts(cfg.font.size);
-    trace_resize((" (win_reconfig -> win_adapt_term_size)\n"));
+    trace_resize((" (font_cs_reconfig -> win_adapt_term_size)\n"));
     win_adapt_term_size(true, false);
   }
   win_update_scrollbar();
@@ -976,6 +1069,37 @@ win_reconfig(void)
     child_write(cs_ambig_wide ? "\e[2W" : "\e[1W", 4);
 }
 
+void
+win_reconfig(void)
+{
+  trace_resize(("--- win_reconfig\n"));
+ /* Pass new config data to the terminal */
+  term_reconfig();
+
+  bool font_changed =
+    wcscmp(new_cfg.font.name, cfg.font.name) ||
+    new_cfg.font.size != cfg.font.size ||
+    new_cfg.font.weight != cfg.font.weight ||
+    new_cfg.font.isbold != cfg.font.isbold ||
+    new_cfg.bold_as_font != cfg.bold_as_font ||
+    new_cfg.bold_as_colour != cfg.bold_as_colour ||
+    new_cfg.font_smoothing != cfg.font_smoothing;
+
+  if (new_cfg.fg_colour != cfg.fg_colour)
+    win_set_colour(FG_COLOUR_I, new_cfg.fg_colour);
+
+  if (new_cfg.bg_colour != cfg.bg_colour)
+    win_set_colour(BG_COLOUR_I, new_cfg.bg_colour);
+
+  if (new_cfg.cursor_colour != cfg.cursor_colour)
+    win_set_colour(CURSOR_COLOUR_I, new_cfg.cursor_colour);
+
+  /* Copy the new config and refresh everything */
+  copy_config("win_reconfig", &cfg, &new_cfg);
+
+  font_cs_reconfig(font_changed);
+}
+
 static bool
 confirm_exit(void)
 {
@@ -985,15 +1109,15 @@ confirm_exit(void)
   /* retrieve list of child processes */
   char * pscmd = "/bin/procps -o pid,ruser=USER -o comm -t %s 2> /dev/null || /bin/ps -ef";
   char * tty = child_tty();
-  if (strrchr (tty, '/'))
-    tty = strrchr (tty, '/') + 1;
+  if (strrchr(tty, '/'))
+    tty = strrchr(tty, '/') + 1;
   char cmd[strlen(pscmd) + strlen(tty) + 1];
-  sprintf (cmd, pscmd, tty, tty);
-  FILE * procps = popen (cmd, "r");
+  sprintf(cmd, pscmd, tty, tty);
+  FILE * procps = popen(cmd, "r");
   char * msg_pre = "Processes are running in session:\n";
   char * msg_post = "Close anyway?";
-  char * msg = malloc (strlen (msg_pre) + 1);
-  strcpy (msg, msg_pre);
+  char * msg = malloc(strlen(msg_pre) + 1);
+  strcpy(msg, msg_pre);
   if (procps) {
     char line[999];  // use very long input despite narrow msg box
                      // to avoid high risk of clipping within UTF-8 
@@ -1002,23 +1126,23 @@ confirm_exit(void)
     bool filter_tty = false;
     while (fgets(line, sizeof line, procps)) {
       line[strcspn(line, "\r\n")] = 0;  /* trim newline */
-      if (first || !filter_tty || strstr (line, tty))  // should check column position too...
+      if (first || !filter_tty || strstr(line, tty))  // should check column position too...
       {
         if (first) {
-          if (strstr (line, "TTY")) {
+          if (strstr(line, "TTY")) {
             filter_tty = true;
           }
           first = false;
         }
-        msg = realloc (msg, strlen (msg) + strlen (line) + 2);
-        strcat (msg, line);
-        strcat (msg, "\n");
+        msg = realloc(msg, strlen(msg) + strlen(line) + 2);
+        strcat(msg, line);
+        strcat(msg, "\n");
       }
     }
     pclose(procps);
   }
-  msg = realloc (msg, strlen (msg) + strlen (msg_post) + 1);
-  strcat (msg, msg_post);
+  msg = realloc(msg, strlen(msg) + strlen(msg_post) + 1);
+  strcat(msg, msg_post);
 
   size_t size = cs_mbstowcs(0, msg, 0) + 1;
   int ret;
@@ -1026,7 +1150,7 @@ confirm_exit(void)
     wchar msgw[size];
     cs_mbstowcs(msgw, msg, size);
     wchar appn[strlen(APPNAME) + 1];
-    cs_mbstowcs(appn, APPNAME, sizeof appn);
+    cs_mbstowcs(appn, APPNAME, lengthof(appn));
     ret =
       MessageBoxW(
         wnd, msgw,
@@ -1045,13 +1169,13 @@ confirm_exit(void)
   return !ret || ret == IDOK;
 }
 
-#define dont_debug_windows_messages
-#define dont_debug_windows_mouse_messages
+#define dont_debug_messages
+#define dont_debug_mouse_messages
 
 static LRESULT CALLBACK
 win_proc(HWND wnd, UINT message, WPARAM wp, LPARAM lp)
 {
-#ifdef debug_windows_messages
+#ifdef debug_messages
 static struct {
   uint wm_;
   char * wm_name;
@@ -1066,10 +1190,10 @@ static struct {
     }
   if ((message != WM_KEYDOWN || !(lp & 0x40000000))
       && message != WM_TIMER && message != WM_NCHITTEST
-#ifndef debug_windows_mouse_messages
+# ifndef debug_mouse_messages
       && message != WM_SETCURSOR
       && message != WM_MOUSEMOVE && message != WM_NCMOUSEMOVE
-#endif
+# endif
      )
     printf("[%d] win_proc %04X %s (%04X %08X)\n", (int)time(0), message, wm_name, (unsigned)wp, (unsigned)lp);
 #endif
@@ -1080,11 +1204,28 @@ static struct {
       cb();
       return 0;
     }
+
     when WM_CLOSE:
       if (!cfg.confirm_exit || confirm_exit())
         child_kill((GetKeyState(VK_SHIFT) & 0x80) != 0);
       return 0;
-    when WM_COMMAND or WM_SYSCOMMAND:
+
+    when WM_COMMAND or WM_SYSCOMMAND: {
+# ifdef debug_messages
+      static struct {
+        uint idm_;
+        char * idm_name;
+      } idm_names[] = {
+# include "winids.t"
+      };
+      char * idm_name = "?";
+      for (uint i = 0; i < lengthof(idm_names); i++)
+        if ((wp & ~0xF) == idm_names[i].idm_) {
+          idm_name = idm_names[i].idm_name;
+          break;
+        }
+      printf("                   %s\n", idm_name);
+# endif
       switch (wp & ~0xF) {  /* low 4 bits reserved to Windows */
         when IDM_OPEN: term_open();
         when IDM_COPY: term_copy();
@@ -1094,13 +1235,19 @@ static struct {
         when IDM_DEFSIZE:
           default_size();
         when IDM_DEFSIZE_ZOOM:
-          default_size();
-#ifdef doesnotwork_after_shift_drag
           if (GetKeyState(VK_SHIFT) & 0x80) {
-            win_set_font_size(cfg.font.size, false);
+            // Shift+Alt+F10 should restore both window size and font size
+
+            // restore default font size first:
+            win_zoom_font(0, false);
+
+            // restore window size:
+            default_size_token = true;
+            default_size();  // or defer to WM_PAINT
+          }
+          else {
             default_size();
           }
-#endif
         when IDM_FULLSCREEN or IDM_FULLSCREEN_ZOOM:
           if ((wp & ~0xF) == IDM_FULLSCREEN_ZOOM)
             zoom_token = 4;  // override cfg.zoom_font_with_window == 0
@@ -1117,6 +1264,8 @@ static struct {
         when IDM_NEW_MONI: child_fork(main_argc, main_argv, (int)lp - ' ');
         when IDM_COPYTITLE: win_copy_title();
       }
+    }
+
     when WM_VSCROLL:
       switch (LOWORD(wp)) {
         when SB_BOTTOM:   term_scroll(-1, 0);
@@ -1133,35 +1282,44 @@ static struct {
           term_scroll(1, info.nTrackPos);
         }
       }
+
+    when WM_MOUSEMOVE: win_mouse_move(false, lp);
+    when WM_NCMOUSEMOVE: win_mouse_move(true, lp);
+    when WM_MOUSEWHEEL: win_mouse_wheel(wp, lp);
     when WM_LBUTTONDOWN: win_mouse_click(MBT_LEFT, lp);
     when WM_RBUTTONDOWN: win_mouse_click(MBT_RIGHT, lp);
     when WM_MBUTTONDOWN: win_mouse_click(MBT_MIDDLE, lp);
     when WM_LBUTTONUP: win_mouse_release(MBT_LEFT, lp);
     when WM_RBUTTONUP: win_mouse_release(MBT_RIGHT, lp);
     when WM_MBUTTONUP: win_mouse_release(MBT_MIDDLE, lp);
-    when WM_MOUSEMOVE: win_mouse_move(false, lp);
-    when WM_NCMOUSEMOVE: win_mouse_move(true, lp);
-    when WM_MOUSEWHEEL: win_mouse_wheel(wp, lp);
+
+    when WM_KEYDOWN or WM_SYSKEYDOWN:
+      if (win_key_down(wp, lp))
+        return 0;
+
+    when WM_KEYUP or WM_SYSKEYUP:
+      if (win_key_up(wp, lp))
+        return 0;
+
+    when WM_CHAR or WM_SYSCHAR:
+      child_sendw(&(wchar){wp}, 1);
+      return 0;
+
     when WM_INPUTLANGCHANGEREQUEST:  // catch Shift-Control-0
       if ((GetKeyState(VK_SHIFT) & 0x80) && (GetKeyState(VK_CONTROL) & 0x80))
         if (win_key_down('0', 0x000B0001))
           return 0;
-    when WM_KEYDOWN or WM_SYSKEYDOWN:
-      if (win_key_down(wp, lp))
-        return 0;
-    when WM_KEYUP or WM_SYSKEYUP:
-      if (win_key_up(wp, lp))
-        return 0;
-    when WM_CHAR or WM_SYSCHAR:
-      child_sendw(&(wchar){wp}, 1);
-      return 0;
+
     when WM_INPUTLANGCHANGE:
       win_set_ime_open(ImmIsIME(GetKeyboardLayout(0)) && ImmGetOpenStatus(imc));
+
     when WM_IME_NOTIFY:
       if (wp == IMN_SETOPENSTATUS)
         win_set_ime_open(ImmGetOpenStatus(imc));
+
     when WM_IME_STARTCOMPOSITION:
       ImmSetCompositionFont(imc, &lfont);
+
     when WM_IME_COMPOSITION:
       if (lp & GCS_RESULTSTR) {
         LONG len = ImmGetCompositionStringW(imc, GCS_RESULTSTR, null, 0);
@@ -1172,30 +1330,69 @@ static struct {
         }
         return 1;
       }
+
+    when WM_THEMECHANGED or WM_WININICHANGE or WM_SYSCOLORCHANGE:
+      // Size of window border (border, title bar, scrollbar) changed by:
+      //   Personalization of window geometry (e.g. Title Bar Size)
+      //     -> Windows sends WM_SYSCOLORCHANGE
+      //   Performance Option "Use visual styles on windows and borders"
+      //     -> Windows sends WM_THEMECHANGED and WM_SYSCOLORCHANGE
+      // and in both case a couple of WM_WININICHANGE
+
+      win_adjust_borders();
+      RedrawWindow(wnd, null, null, 
+                   RDW_FRAME | RDW_INVALIDATE |
+                   RDW_UPDATENOW | RDW_ALLCHILDREN);
+      win_update_search();
+
+    when WM_FONTCHANGE:
+      font_cs_reconfig(true);
+
     when WM_PAINT:
       win_paint();
+
+#ifdef handle_default_size_asynchronously
+      if (default_size_token) {
+        default_size();
+        default_size_token = false;
+      }
+#endif
+
       return 0;
+
+    when WM_ACTIVATE:
+      if ((wp & 0xF) != WA_INACTIVE) {
+        flash_taskbar(false);  /* stop */
+        term_set_focus(true, true);
+      } else {
+        term_set_focus(false, true);
+      }
+      update_transparency();
+      win_key_reset();
+
     when WM_SETFOCUS:
       trace_resize(("# WM_SETFOCUS VK_SHIFT %02X\n", GetKeyState(VK_SHIFT)));
-      term_set_focus(true);
+      term_set_focus(true, false);
       CreateCaret(wnd, caretbm, 0, 0);
-      flash_taskbar(false);  /* stop */
+      //flash_taskbar(false);  /* stop; not needed when leaving search bar */
       win_update();
-      update_transparency();
       ShowCaret(wnd);
       zoom_token = -4;
+
+    when WM_KILLFOCUS:
+      win_show_mouse();
+      term_set_focus(false, false);
+      DestroyCaret();
+      win_update();
+
     when WM_MOVING:
       trace_resize(("# WM_MOVING VK_SHIFT %02X\n", GetKeyState(VK_SHIFT)));
       zoom_token = -4;
-    when WM_KILLFOCUS:
-      win_show_mouse();
-      term_set_focus(false);
-      DestroyCaret();
-      win_update();
-      update_transparency();
+
     when WM_ENTERSIZEMOVE:
       trace_resize(("# WM_ENTERSIZEMOVE VK_SHIFT %02X\n", GetKeyState(VK_SHIFT)));
       resizing = true;
+
     when WM_EXITSIZEMOVE or WM_CAPTURECHANGED:  // after mouse-drag resizing
       trace_resize(("# WM_EXITSIZEMOVE (resizing %d) VK_SHIFT %02X\n", resizing, GetKeyState(VK_SHIFT)));
       bool shift = GetKeyState(VK_SHIFT) & 0x80;
@@ -1205,6 +1402,7 @@ static struct {
         trace_resize((" (win_proc (WM_EXITSIZEMOVE) -> win_adapt_term_size)\n"));
         win_adapt_term_size(shift, false);
       }
+
     when WM_SIZING: {  // mouse-drag window resizing
       trace_resize(("# WM_SIZING (resizing %d) VK_SHIFT %02X\n", resizing, GetKeyState(VK_SHIFT)));
       zoom_token = 2;
@@ -1240,6 +1438,7 @@ static struct {
 
       return ew || eh;
     }
+
     when WM_SIZE: {
       trace_resize(("# WM_SIZE (resizing %d) VK_SHIFT %02X\n", resizing, GetKeyState(VK_SHIFT)));
       if (wp == SIZE_RESTORED && win_is_fullscreen)
@@ -1265,17 +1464,21 @@ static struct {
             zoom_token = 1;
 #endif
         bool scale_font = (cfg.zoom_font_with_window || zoom_token > 2)
-                          && (zoom_token > 0) && (GetKeyState(VK_SHIFT) & 0x80);
+                       && (zoom_token > 0) && (GetKeyState(VK_SHIFT) & 0x80)
+                       && !default_size_token;
         win_adapt_term_size(false, scale_font);
         if (zoom_token > 0)
           zoom_token = zoom_token >> 1;
+        default_size_token = false;
       }
 
       return 0;
     }
+
     when WM_INITMENU:
       win_update_menus();
       return 0;
+
     when WM_DPICHANGED:
 #ifdef debug_dpi
       printf("WM_DPICHANGED %d\n", per_monitor_dpi_aware);
@@ -1323,7 +1526,7 @@ static const char help[] =
   "  -V, --version         Print version information and exit\n"
 ;
 
-static const char short_opts[] = "+:c:C:eh:i:l:o:p:s:t:T:B:R:uw:HVd";
+static const char short_opts[] = "+:c:C:eh:i:l:o:p:s:t:T:B:R:uw:HVdD";
 
 static const struct option
 opts[] = {
@@ -1346,6 +1549,7 @@ opts[] = {
   {"help",       no_argument,       0, 'H'},
   {"version",    no_argument,       0, 'V'},
   {"nodaemon",   no_argument,       0, 'd'},
+  {"daemon",     no_argument,       0, 'D'},
   {"nopin",      no_argument,       0, ''},  // short option not enabled
   {"store-taskbar-properties", no_argument, 0, ''},  // no short option
   {0, 0, 0, 0}
@@ -1356,6 +1560,13 @@ show_msg(FILE *stream, string msg)
 {
   if (fputs(msg, stream) < 0 || fflush(stream) < 0)
     MessageBox(0, msg, APPNAME, MB_OK);
+}
+
+static void
+show_msg_w(FILE *stream, wstring msg)
+{
+  if (fprintf(stream, "%ls", msg) < 0 || fputs("\n", stream) < 0 || fflush(stream) < 0)
+    MessageBoxW(0, msg, _W(APPNAME), MB_OK);
 }
 
 static no_return __attribute__((format(printf, 1, 2)))
@@ -1372,6 +1583,7 @@ error(char *format, ...)
   exit(1);
 }
 
+#ifdef old_warn
 static void __attribute__((format(printf, 1, 2)))
 warn(char *format, ...)
 {
@@ -1382,6 +1594,23 @@ warn(char *format, ...)
   va_end(va);
   msg = asform("%s: %s\n", main_argv[0], msg);
   show_msg(stderr, msg);
+}
+#endif
+
+static void
+warnw(wstring msg, wstring file, wstring err)
+{
+#if CYGWIN_VERSION_API_MINOR >= 201
+  wstring format = (err && *err) ? L"%s: %ls '%ls':\n%ls" : L"%s: %ls '%ls'";
+  wchar mess[wcslen(format) + strlen(main_argv[0]) + wcslen(msg) + wcslen(file) + (err ? wcslen(err) : 0)];
+  swprintf(mess, lengthof(mess), format, main_argv[0], msg, file, err);
+  show_msg_w(stderr, mess);
+#else
+  //MinGW
+  (void)msg; (void)file; (void)err; (void)show_msg_w;
+  string mess = "could not load icon file";
+  show_msg(stderr, mess);
+#endif
 }
 
 void
@@ -1423,17 +1652,109 @@ exit_mintty()
   exit(0);
 }
 
+
+#if CYGWIN_VERSION_DLL_MAJOR >= 1005
+
+#include <shlobj.h>
+
+static wchar *
+get_shortcut_icon_location(wchar * iconfile)
+{
+  IShellLinkW * shell_link;
+  IPersistFile * persist_file;
+  HRESULT hres = OleInitialize(NULL);
+  if (hres != S_FALSE && hres != S_OK)
+    return 0;
+
+  hres = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
+                          &IID_IShellLinkW, (void **) &shell_link);
+  if (!SUCCEEDED(hres))
+    return 0;
+
+  hres = shell_link->lpVtbl->QueryInterface(shell_link, &IID_IPersistFile,
+                                            (void **) &persist_file);
+  if (!SUCCEEDED(hres)) {
+    shell_link->lpVtbl->Release(shell_link);
+    return 0;
+  }
+
+  /* Load the shortcut.  */
+  hres = persist_file->lpVtbl->Load(persist_file, iconfile, STGM_READ);
+
+  wchar * result = 0;
+
+  if (SUCCEEDED(hres)) {
+    WCHAR wil[MAX_PATH + 1];
+    int index;
+    shell_link->lpVtbl->GetIconLocation(shell_link, wil, lengthof(wil), &index);
+
+    wchar * wicon = wil;
+
+    /* Append ,icon-index if non-zero.  */
+    wchar * widx = L"";
+    if (index) {
+      char idx[22];
+      sprintf(idx, ",%d", index);
+      widx = cs__mbstowcs(idx);
+    }
+
+    /* Resolve leading Windows environment variable component.  */
+    wchar * wenv = L"";
+    wchar * fin;
+    if (wil[0] == '%' && wil[1] && wil[1] != '%' && (fin = wcschr(&wil[2], '%'))) {
+      char var[fin - wil];
+      char * cop = var;
+      wchar * v;
+      for (v = &wil[1]; *v != '%'; v++) {
+        if (*v >= 'a' && *v <= 'z')
+          *cop = *v - 'a' + 'A';
+        else
+          *cop = *v;
+        cop++;
+      }
+      *cop = '\0';
+      v ++;
+      wicon = v;
+
+      char * val = getenv(var);
+      if (val) {
+        wenv = cs__mbstowcs(val);
+      }
+    }
+
+    result = newn(wchar, wcslen(wenv) + wcslen(wicon) + wcslen(widx) + 1);
+    wcscpy(result, wenv);
+    wcscpy(&result[wcslen(result)], wicon);
+    wcscpy(&result[wcslen(result)], widx);
+    if (* widx)
+      free(widx);
+    if (* wenv)
+      free(wenv);
+  }
+
+  /* Release the pointer to the IPersistFile interface. */
+  persist_file->lpVtbl->Release(persist_file);
+
+  /* Release the pointer to the IShellLink interface. */
+  shell_link->lpVtbl->Release(shell_link);
+
+  return result;
+}
+
+#endif
+
 static void
 configure_taskbar()
 {
+#define no_patch_jumplist
 #ifdef patch_jumplist
 #include "jumplist.h"
   // test data
-  char ** jump_list_title = {
-    "title1", "", "", "mä€", "", "", "", "", "", "", 
+  wchar * jump_list_title[] = {
+    L"title1", L"", L"", L"mä€", L"", L"", L"", L"", L"", L"", 
   };
-  char ** jump_list_cmd = {
-    "-o Rows=15", "-o Rows=20", "", "-t mö€", "", "", "", "", "", "", 
+  wchar * jump_list_cmd[] = {
+    L"-o Rows=15", L"-o Rows=20", L"", L"-t mö€", L"", L"", L"", L"", L"", L"", 
   };
   // the patch offered in issue #290 does not seem to work
   setup_jumplist(jump_list_title, jump_list_cmd);
@@ -1441,10 +1762,10 @@ configure_taskbar()
 
 #if CYGWIN_VERSION_DLL_MAJOR >= 1007
   // initial patch (issue #471) contributed by Johannes Schindelin
-  const char * app_id = cfg.app_id;
-  const char * relaunch_icon = cfg.icon;
-  const char * relaunch_display_name = cfg.app_name;
-  const char * relaunch_command = cfg.app_launch_cmd;
+  wchar * app_id = (wchar *) cfg.app_id;
+  wchar * relaunch_icon = (wchar *) cfg.icon;
+  wchar * relaunch_display_name = (wchar *) cfg.app_name;
+  wchar * relaunch_command = (wchar *) cfg.app_launch_cmd;
 
 #define dont_debug_properties
 
@@ -1489,7 +1810,6 @@ configure_taskbar()
       printf("SHGetPropertyStoreForWindow linked %d\n", !!pGetPropertyStore);
 #endif
     if (pGetPropertyStore) {
-      size_t size;
       IPropertyStore *pps;
       HRESULT hr;
       PROPVARIANT var;
@@ -1503,44 +1823,32 @@ configure_taskbar()
         // def: typedef struct tagPROPVARIANT PROPVARIANT: propidl.h
         // def: enum VARENUM (VT_*): wtypes.h
         // def: PKEY_*: propkey.h
-        if (relaunch_command && *relaunch_command && store_taskbar_properties
-            && (size = cs_mbstowcs(0, relaunch_command, 0) + 1)) {
-          var.pwszVal = malloc(size * sizeof(wchar));
-          if (var.pwszVal) {
+        if (relaunch_command && *relaunch_command && store_taskbar_properties) {
 #ifdef debug_properties
-            printf("AppUserModel_RelaunchCommand=%s\n", relaunch_command);
+          printf("AppUserModel_RelaunchCommand=%ls\n", relaunch_command);
 #endif
-            cs_mbstowcs(var.pwszVal, relaunch_command, size);
-            var.vt = VT_LPWSTR;
-            pps->lpVtbl->SetValue(pps,
-                &PKEY_AppUserModel_RelaunchCommand, &var);
-          }
+          var.pwszVal = relaunch_command;
+          var.vt = VT_LPWSTR;
+          pps->lpVtbl->SetValue(pps,
+              &PKEY_AppUserModel_RelaunchCommand, &var);
         }
-        if (relaunch_display_name && *relaunch_display_name &&
-            (size = cs_mbstowcs(0, relaunch_display_name, 0) + 1)) {
-          var.pwszVal = malloc(size * sizeof(wchar));
-          if (var.pwszVal) {
+        if (relaunch_display_name && *relaunch_display_name) {
 #ifdef debug_properties
-            printf("AppUserModel_RelaunchDisplayNameResource=%s\n", relaunch_display_name);
+          printf("AppUserModel_RelaunchDisplayNameResource=%ls\n", relaunch_display_name);
 #endif
-            cs_mbstowcs(var.pwszVal, relaunch_display_name, size);
-            var.vt = VT_LPWSTR;
-            pps->lpVtbl->SetValue(pps,
-                &PKEY_AppUserModel_RelaunchDisplayNameResource, &var);
-          }
+          var.pwszVal = relaunch_display_name;
+          var.vt = VT_LPWSTR;
+          pps->lpVtbl->SetValue(pps,
+              &PKEY_AppUserModel_RelaunchDisplayNameResource, &var);
         }
-        if (relaunch_icon && *relaunch_icon &&
-            (size = cs_mbstowcs(0, relaunch_icon, 0) + 1)) {
-          var.pwszVal = malloc(size * sizeof(wchar));
-          if (var.pwszVal) {
+        if (relaunch_icon && *relaunch_icon) {
 #ifdef debug_properties
-            printf("AppUserModel_RelaunchIconResource=%s\n", relaunch_icon);
+          printf("AppUserModel_RelaunchIconResource=%ls\n", relaunch_icon);
 #endif
-            cs_mbstowcs(var.pwszVal, relaunch_icon, size);
-            var.vt = VT_LPWSTR;
-            pps->lpVtbl->SetValue(pps,
-                &PKEY_AppUserModel_RelaunchIconResource, &var);
-          }
+          var.pwszVal = relaunch_icon;
+          var.vt = VT_LPWSTR;
+          pps->lpVtbl->SetValue(pps,
+              &PKEY_AppUserModel_RelaunchIconResource, &var);
         }
         if (prevent_pinning) {
           var.boolVal = VARIANT_TRUE;
@@ -1566,18 +1874,14 @@ DEFINE_PROPERTYKEY(PKEY_AppUserModel_StartPinOption, 0x9f4c2855,0x9f79,0x4B39,0x
               &PKEY_AppUserModel_StartPinOption, &var);
         }
 #endif
-        if (app_id && *app_id &&
-            (size = cs_mbstowcs(0, app_id, 0) + 1)) {
-          var.pwszVal = malloc(size * sizeof(wchar));
-          if (var.pwszVal) {
+        if (app_id && *app_id) {
 #ifdef debug_properties
-            printf("AppUserModel_ID=%s\n", app_id);
+          printf("AppUserModel_ID=%ls\n", app_id);
 #endif
-            cs_mbstowcs(var.pwszVal, app_id, size);
-            var.vt = VT_LPWSTR;  // VT_EMPTY should remove but has no effect
-            pps->lpVtbl->SetValue(pps,
-                &PKEY_AppUserModel_ID, &var);
-          }
+          var.pwszVal = app_id;
+          var.vt = VT_LPWSTR;  // VT_EMPTY should remove but has no effect
+          pps->lpVtbl->SetValue(pps,
+              &PKEY_AppUserModel_ID, &var);
         }
 
         pps->lpVtbl->Commit(pps);
@@ -1593,6 +1897,17 @@ main(int argc, char *argv[])
 {
   main_argv = argv;
   main_argc = argc;
+#ifdef debuglog
+  mtlog = fopen("/tmp/mtlog", "a");
+  {
+    char timbuf [22];
+    struct timeval now;
+    gettimeofday (& now, 0);
+    strftime(timbuf, sizeof (timbuf), "%Y-%m-%d %H:%M:%S", localtime(& now.tv_sec));
+    fprintf(mtlog, "[%s.%03d] %s\n", timbuf, (int)now.tv_usec / 1000, argv[0]);
+    fflush(mtlog);
+  }
+#endif
   init_config();
   cs_init();
 
@@ -1609,18 +1924,43 @@ main(int argc, char *argv[])
     asform("/home/%s", getlogin());
 
   // Set size and position defaults.
-  STARTUPINFO sui;
-  GetStartupInfo(&sui);
+  STARTUPINFOW sui;
+  GetStartupInfoW(&sui);
   cfg.window = sui.dwFlags & STARTF_USESHOWWINDOW ? sui.wShowWindow : SW_SHOW;
   cfg.x = cfg.y = CW_USEDEFAULT;
+#if CYGWIN_VERSION_DLL_MAJOR >= 1005
   invoked_from_shortcut = sui.dwFlags & STARTF_TITLEISLINKNAME;
   invoked_with_appid = sui.dwFlags & STARTF_TITLEISAPPID;
   // shortcut or AppId would be found in sui.lpTitle
+# ifdef debuglog
+  fprintf(mtlog, "shortcut %d %ls\n", invoked_from_shortcut, sui.lpTitle);
+# endif
+#endif
 
   load_config("/etc/minttyrc", true);
   string rc_file = asform("%s/.minttyrc", home);
   load_config(rc_file, true);
   delete(rc_file);
+
+  if (getenv("MINTTY_ICON")) {
+    //cfg.icon = strdup(getenv("MINTTY_ICON"));
+    cfg.icon = cs__utftowcs(getenv("MINTTY_ICON"));
+    icon_is_from_shortcut = true;
+    unsetenv("MINTTY_ICON");
+  }
+
+#if CYGWIN_VERSION_DLL_MAJOR >= 1005
+  if (invoked_from_shortcut) {
+    wchar * icon = get_shortcut_icon_location(sui.lpTitle);
+# ifdef debuglog
+    fprintf(mtlog, "icon <%ls>\n", icon); fflush(mtlog);
+# endif
+    if (icon) {
+      cfg.icon = icon;
+      icon_is_from_shortcut = true;
+    }
+  }
+#endif
 
   for (;;) {
     int opt = getopt_long(argc, argv, short_opts, opts, 0);
@@ -1671,9 +2011,9 @@ main(int argc, char *argv[])
         set_arg_option("Title", optarg);
         title_settable = false;
       when 'B':
-        border_style = strdup (optarg);
+        border_style = strdup(optarg);
       when 'R':
-        report_geom = strdup (optarg);
+        report_geom = strdup(optarg);
       when 'u': cfg.utmp = true;
       when '':
         prevent_pinning = true;
@@ -1683,6 +2023,8 @@ main(int argc, char *argv[])
       when '': set_arg_option("Class", optarg);
       when 'd':
         cfg.daemonize = false;
+      when 'D':
+        cfg.daemonize_always = true;
       when 'H':
         show_msg(stdout, help);
         return 0;
@@ -1696,21 +2038,30 @@ main(int argc, char *argv[])
               longopt[1] == '-' ? longopt : shortopt);
     }
   }
+  copy_config("main after -o", &file_cfg, &cfg);
+  if (*cfg.theme_file)
+    load_theme(cfg.theme_file);
 
+  finish_config();
+
+  int term_rows = cfg.rows;
+  int term_cols = cfg.cols;
   if (getenv("MINTTY_ROWS")) {
-    set_arg_option("Rows", getenv("MINTTY_ROWS"));
+    term_rows = atoi(getenv("MINTTY_ROWS"));
+    if (term_rows < 1)
+      term_rows = cfg.rows;
     unsetenv("MINTTY_ROWS");
   }
   if (getenv("MINTTY_COLS")) {
-    set_arg_option("Columns", getenv("MINTTY_COLS"));
+    term_cols = atoi(getenv("MINTTY_COLS"));
+    if (term_cols < 1)
+      term_cols = cfg.cols;
     unsetenv("MINTTY_COLS");
   }
   if (getenv("MINTTY_MONITOR")) {
     monitor = atoi(getenv("MINTTY_MONITOR"));
     unsetenv("MINTTY_MONITOR");
   }
-
-  finish_config();
 
   // if started from console, try to detach from caller's terminal (~daemonizing)
   // in order to not suppress signals
@@ -1722,6 +2073,8 @@ main(int argc, char *argv[])
   // disable daemonizing if started from ConEmu
   if (getenv("ConEmuPID"))
     daemonize = false;
+  if (cfg.daemonize_always)
+    daemonize = true;
   if (daemonize) {  // detach from parent process and terminal
     pid_t pid = fork();
     if (pid < 0)
@@ -1769,7 +2122,9 @@ main(int argc, char *argv[])
   // Load icon if specified.
   HICON large_icon = 0, small_icon = 0;
   if (*cfg.icon) {
-    string icon_file = strdup(cfg.icon);
+    //string icon_file = strdup(cfg.icon);
+    // could use path_win_w_to_posix(cfg.icon) to avoid the locale trick below
+    string icon_file = cs__wcstoutf(cfg.icon);
     uint icon_index = 0;
     char *comma = strrchr(icon_file, ',');
     if (comma) {
@@ -1781,30 +2136,43 @@ main(int argc, char *argv[])
         icon_index = 0;
     }
     SetLastError(0);
-#if CYGWIN_VERSION_API_MINOR >= 181
-    wchar *win_icon_file = cygwin_create_path(CCP_POSIX_TO_WIN_W, icon_file);
+#if HAS_LOCALES
+    char * valid_locale = setlocale(LC_CTYPE, 0);
+    if (valid_locale) {
+      valid_locale = strdup(valid_locale);
+      setlocale(LC_CTYPE, "C.UTF-8");
+# if CYGWIN_VERSION_API_MINOR >= 222
+      cygwin_internal(CW_INT_SETLOCALE);  // fix internal locale
+# endif
+    }
+#endif
+    wchar *win_icon_file = path_posix_to_win_w(icon_file);
+#if HAS_LOCALES
+    if (valid_locale) {
+      setlocale(LC_CTYPE, valid_locale);
+# if CYGWIN_VERSION_API_MINOR >= 222
+      cygwin_internal(CW_INT_SETLOCALE);  // fix internal locale
+# endif
+      free(valid_locale);
+    }
+#endif
     if (win_icon_file) {
       ExtractIconExW(win_icon_file, icon_index, &large_icon, &small_icon, 1);
       free(win_icon_file);
     }
-#else
-    char win_icon_file[MAX_PATH];
-    cygwin_conv_to_win32_path(icon_file, win_icon_file);
-    ExtractIconExA(win_icon_file, icon_index, &large_icon, &small_icon, 1);
-#endif
     if (!large_icon) {
       small_icon = 0;
-      uint error = GetLastError();
-      if (error) {
-        char msg[1024];
-        FormatMessage(
+      uint err = GetLastError();
+      if (err) {
+        wchar winmsg[1024];
+        FormatMessageW(
           FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_MAX_WIDTH_MASK,
-          0, error, 0, msg, sizeof msg, 0
+          0, err, 0, winmsg, lengthof(winmsg), 0
         );
-        warn("could not load icon from '%s': %s", cfg.icon, msg);
+        warnw(L"could not load icon file", cfg.icon, winmsg);
       }
       else
-        warn("could not load icon from '%s'", cfg.icon);
+        warnw(L"could not load icon file", cfg.icon, L"");
     }
     delete(icon_file);
   }
@@ -1815,52 +2183,35 @@ main(int argc, char *argv[])
     HRESULT (WINAPI *pSetAppID)(PCWSTR) =
       (void *)GetProcAddress(shell, "SetCurrentProcessExplicitAppUserModelID");
 
-    if (pSetAppID) {
-      size_t size = cs_mbstowcs(0, cfg.app_id, 0) + 1;
-      if (size) {
-        wchar buf[size];
-        cs_mbstowcs(buf, cfg.app_id, size);
-        pSetAppID(buf);
-      }
-    }
+    if (pSetAppID)
+      pSetAppID(cfg.app_id);
   }
 
   inst = GetModuleHandle(NULL);
 
   // Window class name.
   wstring wclass = _W(APPNAME);
-  if (*cfg.class) {
-    size_t size = cs_mbstowcs(0, cfg.class, 0) + 1;
-    if (size) {
-      wchar *buf = newn(wchar, size);
-      cs_mbstowcs(buf, cfg.class, size);
-      wclass = buf;
-    }
-    else
-      fputs("Using default class name due to invalid characters.\n", stderr);
-  }
+  if (*cfg.class)
+    wclass = cfg.class;
 
   // Put child command line into window title if we haven't got one already.
-  string title = cfg.title;
-  if (!*title) {
+  wstring wtitle = cfg.title;
+  if (!*wtitle) {
     size_t len;
     char *argz;
     argz_create(argv, &argz, &len);
     argz_stringify(argz, len, ' ');
-    title = argz;
-  }
-
-  // Convert title to Unicode. Default to application name if unsuccessful.
-  wstring wtitle = _W(APPNAME);
-  {
+    char * title = argz;
     size_t size = cs_mbstowcs(0, title, 0) + 1;
     if (size) {
       wchar *buf = newn(wchar, size);
       cs_mbstowcs(buf, title, size);
       wtitle = buf;
     }
-    else
-      fputs("Using default title due to invalid characters.\n", stderr);
+    else {
+      fputs("Using default title due to invalid characters in program name.\n", stderr);
+      wtitle = _W(APPNAME);
+    }
   }
 
   // The window class.
@@ -1889,14 +2240,14 @@ main(int argc, char *argv[])
   cs_reconfig();
 
   // Determine window sizes.
-  int term_width = font_width * cfg.cols;
-  int term_height = font_height * cfg.rows;
+  int term_width = font_width * term_cols;
+  int term_height = font_height * term_rows;
 
   RECT cr = {0, 0, term_width + 2 * PADDING, term_height + 2 * PADDING};
   RECT wr = cr;
   LONG window_style = WS_OVERLAPPEDWINDOW;
   if (border_style) {
-    if (strcmp (border_style, "void") == 0)
+    if (strcmp(border_style, "void") == 0)
       window_style &= ~(WS_CAPTION | WS_BORDER | WS_THICKFRAME);
     else
       window_style &= ~(WS_CAPTION | WS_BORDER);
@@ -1945,7 +2296,7 @@ main(int argc, char *argv[])
     MONITORINFO mi;
     get_my_monitor_info(&mi);
     RECT ar = mi.rcWork;
-    printpos ("cre", x, y, ar);
+    printpos("cre", x, y, ar);
 
     if (monitor > 0) {
       MONITORINFO monmi;
@@ -1955,7 +2306,7 @@ main(int argc, char *argv[])
       if (x == (int)CW_USEDEFAULT) {
         // Shift and scale assigned default position to selected monitor.
         win_get_pos(&x, &y);
-        printpos ("def", x, y, ar);
+        printpos("def", x, y, ar);
         x = monar.left + (x - ar.left) * (monar.right - monar.left) / (ar.right - ar.left);
         y = monar.top + (y - ar.top) * (monar.bottom - monar.top) / (ar.bottom - ar.top);
       }
@@ -1966,7 +2317,7 @@ main(int argc, char *argv[])
       }
 
       ar = monar;
-      printpos ("mon", x, y, ar);
+      printpos("mon", x, y, ar);
     }
 
     if (cfg.x == (int)CW_USEDEFAULT) {
@@ -1976,7 +2327,7 @@ main(int argc, char *argv[])
         cfg.x = 0;
       if (top || bottom)
         cfg.y = 0;
-        printpos ("fix", x, y, ar);
+        printpos("fix", x, y, ar);
     }
 
     if (left)
@@ -1991,7 +2342,7 @@ main(int argc, char *argv[])
       y = ar.bottom - cfg.y - height;
     else if (center)
       y = (ar.top + ar.bottom - height) / 2;
-      printpos ("pos", x, y, ar);
+      printpos("pos", x, y, ar);
 
     if (maxwidth) {
       x = ar.left;
@@ -2001,7 +2352,7 @@ main(int argc, char *argv[])
       y = ar.top;
       height = ar.bottom - ar.top;
     }
-    printpos ("fin", x, y, ar);
+    printpos("fin", x, y, ar);
 
     SetWindowPos(wnd, NULL, x, y, width, height,
       SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
@@ -2021,7 +2372,7 @@ main(int argc, char *argv[])
 
   if (border_style) {
     LONG style = GetWindowLong(wnd, GWL_STYLE);
-    if (strcmp (border_style, "void") == 0) {
+    if (strcmp(border_style, "void") == 0) {
       style &= ~(WS_CAPTION | WS_BORDER | WS_THICKFRAME);
     }
     else {
@@ -2045,7 +2396,7 @@ main(int argc, char *argv[])
 
   // Initialise the terminal.
   term_reset();
-  term_resize(cfg.rows, cfg.cols);
+  term_resize(term_rows, term_cols);
 
   // Initialise the scroll bar.
   SetScrollInfo(
@@ -2053,8 +2404,8 @@ main(int argc, char *argv[])
     &(SCROLLINFO){
       .cbSize = sizeof(SCROLLINFO),
       .fMask = SIF_ALL | SIF_DISABLENOSCROLL,
-      .nMin = 0, .nMax = cfg.rows - 1,
-      .nPage = cfg.rows, .nPos = 0,
+      .nMin = 0, .nMax = term_rows - 1,
+      .nPage = term_rows, .nPos = 0,
     },
     false
   );
@@ -2072,7 +2423,7 @@ main(int argc, char *argv[])
 
   // Create child process.
   child_create(
-    argv, &(struct winsize){cfg.rows, cfg.cols, term_width, term_height}
+    argv, &(struct winsize){term_rows, term_cols, term_width, term_height}
   );
 
   // Finally show the window!

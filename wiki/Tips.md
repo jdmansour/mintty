@@ -18,10 +18,18 @@ The **[cygutils](http://www.cygwin.com/cygwin-ug-net/using-effectively.html#usin
 provides the **mkshortcut** utility for creating shortcuts from the command line. 
 See its manual page for details.
 
+A Windows shortcut can be associated with a **Shortcut key** so an instance 
+of mintty can be started using a hotkey. By default, an already running 
+instance would be focussed again with the associated hotkey. To have a 
+new instance started with every usage of the hotkey, use the command-line 
+option ```-D``` for mintty in the shortcut target.
+
 _Note:_ About interaction problems of icon, shortcut, and the Windows taskbar:
 In a Windows desktop shortcut, to achieve consistent icon behaviour, 
 the same icon should be specified in the shortcut properties (Change Icon...) 
-and the mintty command line (Target:).
+and the mintty command line (Target:),
+or (beginning 2.2.3) no icon should be specified on the command line as 
+mintty will then take the icon from the invoking shortcut.
 
 _Note:_ It is suggested to _not_ use the option AppID in a Windows desktop 
 shortcut, or follow the advice about avoiding trouble with taskbar grouping 
@@ -196,11 +204,11 @@ bindkey "^[[1;6I" prev
 Mintty uses the Windows keyboard layout system with its “dead key” mechanism 
 for entering accented characters, enhanced by self-composed characters 
 for dead-key combinations that Windows does not support (e.g. ẃ).
-X11, on the other hand, has the Compose key mechanism for this purpose. 
-The open source **[AllChars](http://allchars.zwolnet.com)** utility 
-can be used to emulate that approach on Windows; however, the old 
-version of it does not yet support Unicode while the new version does 
-not yet run stable.
+
+X11, on the other hand, has the Compose key mechanism for this purpose.
+
+The most seamless and stable **Compose Key for Windows** is 
+**[WinCompose](https://github.com/SamHocevar/wincompose)**.
 
 
 ## Changing colours ##
@@ -215,7 +223,10 @@ echo -ne '\e]11;#C0C0C0\a'  # Light gray background
 echo -ne '\e]12;#00FF00\a'  # Green cursor
 ```
 
-In mintty, the RGB colour values can also be specified using a comma-separated decimal notation, for example `255,0,0` instead of `#FF0000` for red. [X11 colour names](http://en.wikipedia.org/wiki/X11_color_names) are not currently supported though.
+In mintty, the RGB colour values can also be specified using a comma-separated decimal notation, 
+for example `255,0,0` instead of `#FF0000` for red. 
+[X11 colour names](http://en.wikipedia.org/wiki/X11_color_names) 
+are supported, too. See the examples below for all options.
 
 The 16 [ANSI colours](http://en.wikipedia.org/wiki/ANSI_escape_code#Colors) 
 can be set in the configuration file or on the command line using settings 
@@ -251,12 +262,15 @@ Different notations are accepted for colour specifications:
 * *color-name* (using X11 color names, e.g. ```echo -ne '\e]10;bisque2\a'```)
 
 
-## Using colour schemes ##
+## Using colour schemes (“Themes”) ##
 
 Colour schemes (that redefine ANSI colours and possibly foreground/background 
 colours) can be loaded with the option ```-C``` (capital C) or ```--loadconfig``` 
 which loads a configuration file read-only, i.e. configuration changes 
-are not saved to this file.
+are not saved to this file, or with the new setting _ThemeFile_.
+
+In the Options menu, section _Looks_, the _Theme_ popup offers theme files 
+as stored in the resource directory $HOME/.mintty/themes for selection.
 
 There is an excellent colour scheme designer available:
 [4bit Terminal Color Scheme Designer](http://ciembor.github.io/4bit/#) 
@@ -266,18 +280,40 @@ https://github.com/oumu/mintty-color-schemes or
 https://github.com/mavnn/mintty-colors-solarized .
 
 
-## Providing fonts ##
+## Providing and selecting fonts ##
 
 To provide additional fonts for use with mintty, monospace fonts can be 
 installed in Windows. Note that font installation in X11 does not make 
 a font available for mintty as mintty is not an X windows application.
 Some monospace fonts are not explicitly marked as such in the font file.
-In that case the font will not be listed in the mintty Options – Text – Font 
-selection menu. It can still be used by explicit selection, e.g.:
+In that case the font will not be listed in the mintty 
+Options – Text – Font selection menu. 
+It can still be used by explicit selection, e.g.:
 
 ```
 mintty -o Font="Linux Libertine Mono"
 ```
+
+Also, Unicode font names are now supported, e.g.
+```
+mintty -o Font=Sütterlin
+mintty -o Font=옹달샘
+```
+
+The font selection menu lists monospace fonts unless marked to Hide 
+in the Fonts folder of the system Control Panel.
+To include them in the fonts offered in the menu (e.g. to select any of 
+DotumChe, GulimChe, GungsuhChe, MingLiU, MS Gothic, MS Mincho, NSimSun, 
+Simplified Arabic Fixed), do either of:
+* uncheck “Hide fonts based on language settings” in Fonts ▸ Font settings
+* Hide/Show fonts individually from their context menu
+* set the mintty hidden setting ShowHiddenFonts=true
+
+Some fonts with a name problem (e.g. Meslo LG S for Powerline) can be 
+selected using the new Apply button in the font selection menu.
+
+Fonts with an OEM or SYMBOL character set are further excluded from the 
+menu. Fonts not listed in the menu can be configured with the Font option.
 
 
 ## Ambiguous width setting ##

@@ -18,7 +18,7 @@
  */
 #define CPAIR(x, y) ((x) << 8 | (y))
 
-static const char primary_da[] = "\e[?1;2c";
+static const char primary_da[] = "\e[?1;2;6;22c";
 
 /*
  * Move the cursor to a given position, clipping at boundaries. We
@@ -126,7 +126,7 @@ write_bell(void)
 {
   if (cfg.bell_flash)
     term_schedule_vbell(false, 0);
-  win_bell();
+  win_bell(&cfg);
 }
 
 static void
@@ -313,8 +313,12 @@ do_ctrl(char c)
       write_linefeed();
       if (term.newline_mode)
         write_return();
-    when CTRL('E'):   /* ENQ: terminal type query */
-      child_write(cfg.answerback, strlen(cfg.answerback));
+    when CTRL('E'): {  /* ENQ: terminal type query */
+      //child_write(cfg.answerback, strlen(cfg.answerback));
+      char * ab = cs__wcstombs(cfg.answerback);
+      child_write(ab, strlen(ab));
+      free(ab);
+    }
     when CTRL('N'):   /* LS1: Locking-shift one */
       term.curs.g1 = true;
       term_update_cs();
@@ -798,7 +802,10 @@ do_csi(uchar c)
         term.printing = true;
         term.only_printing = !term.esc_mod;
         term.print_state = 0;
-        printer_start_job(cfg.printer);
+        if (*cfg.printer == '*')
+          printer_start_job(printer_get_default());
+        else
+          printer_start_job(cfg.printer);
       }
       else if (arg0 == 4 && term.printing) {
         // Drop escape sequence from print buffer and finish printing.
@@ -1255,7 +1262,7 @@ term_write(const char *buf, uint len)
         int width = xcwidth(wc);
         #endif
 
-        switch(term.curs.csets[term.curs.g1]) {
+        switch (term.curs.csets[term.curs.g1]) {
           when CSET_LINEDRW:
             if (0x60 <= wc && wc <= 0x7E)
               wc = win_linedraw_chars[wc - 0x60];

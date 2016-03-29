@@ -33,17 +33,20 @@ int forkpty(int *, char *, struct termios *, struct winsize *);
 #include <winuser.h>
 #endif
 
-char *home, *cmd;
+bool clone_size_token = true;
 
 static pid_t pid;
 static bool killed;
 static int pty_fd = -1, log_fd = -1, win_fd;
 
 static void
-error(char *action)
+childerror(char * action, bool from_fork)
 {
-  char *msg;
-  int len = asprintf(&msg, "\033[30;41m\033[KFailed to %s: %s.", action, strerror(errno));
+  char * msg;
+  char * err = strerror(errno);
+  if (from_fork && errno == ENOENT)
+    err = "There are no available terminals";
+  int len = asprintf(&msg, "\033[30;41m\033[KError: %s: %s.\033[0m\r\n", action, err);
   if (len > 0) {
     term_write(msg, len);
     free(msg);
@@ -77,10 +80,14 @@ child_create(char *argv[], struct winsize *winp)
   if (pid < 0) {
     pid = 0;
     bool rebase_prompt = (errno == EAGAIN);
-    error("fork child process");
+    //ENOENT  There are no available terminals.
+    //EAGAIN  Cannot allocate sufficient memory to allocate a task structure.
+    //EAGAIN  Not possible to create a new process; RLIMIT_NPROC limit.
+    //ENOMEM  Memory is tight.
+    childerror("could not fork child process", true);
     if (rebase_prompt) {
       static const char msg[] =
-        "\r\nDLL rebasing may be required. See 'rebaseall --help'.";
+        "\033[30;43m\033[KDLL rebasing may be required. See 'rebaseall / rebase --help'.\033[0m\r\n";
       term_write(msg, sizeof msg - 1);
     }
     term_hide_cursor();
@@ -190,12 +197,29 @@ child_create(char *argv[], struct winsize *winp)
 
   // Open log file if any
   if (*cfg.log) {
-    if (!strcmp(cfg.log, "-"))
+    // use cygwin conversion function to escape unencoded characters 
+    // and thus avoid the locale trick (2.2.3)
+
+    if (!wcscmp(cfg.log, L"-"))
       log_fd = fileno(stdout);
     else {
-      log_fd = open(cfg.log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-      if (log_fd < 0)
-        error("open log file");
+      char * log = path_win_w_to_posix(cfg.log);
+      char * format = strchr(log, '%');
+      if (format && * ++ format == 'd' && !strchr(format, '%')) {
+        char logf[strlen(log + 20)];
+        sprintf(logf, log, getpid());
+        log_fd = open(logf, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+      }
+      else
+        log_fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+      if (log_fd < 0) {
+        // report message and filename:
+        childerror("could not open log file", false);
+        childerror(log, false);
+      }
+
+      free(log);
     }
   }
 }
@@ -265,7 +289,7 @@ child_proc(void)
 
         if (!s && cfg.exit_write) {
           s = "TERMINATED";
-          l = 10;
+          l = strlen(s);
         }
         if (s) {
           if (err)
@@ -474,13 +498,11 @@ child_conv_path(wstring wpath)
   else
     exp_path = path;
 
-#if CYGWIN_VERSION_DLL_MAJOR >= 1007
-#if CYGWIN_VERSION_API_MINOR >= 222
+# if CYGWIN_VERSION_API_MINOR >= 222
   // CW_INT_SETLOCALE was introduced in API 0.222
   cygwin_internal(CW_INT_SETLOCALE);
-#endif
-  wchar *win_wpath = cygwin_create_path(CCP_POSIX_TO_WIN_W, exp_path);
-
+# endif
+  wchar *win_wpath = path_posix_to_win_w(exp_path);
   // Drop long path prefix if possible,
   // because some programs have trouble with them.
   if (win_wpath && wcslen(win_wpath) < MAX_PATH) {
@@ -495,12 +517,6 @@ child_conv_path(wstring wpath)
       free(old_win_wpath);
     }
   }
-#else
-  char win_path[MAX_PATH];
-  cygwin_conv_to_win32_path(exp_path, win_path);
-  wchar *win_wpath = newn(wchar, MAX_PATH);
-  MultiByteToWideChar(0, 0, win_path, -1, win_wpath, MAX_PATH);
-#endif
 
   if (exp_path != path)
     free(exp_path);
@@ -515,12 +531,12 @@ child_fork(int argc, char *argv[], int moni)
 
   if (cfg.daemonize) {
     if (clone < 0) {
-      error ("fork child daemon");
+      childerror("could not fork child daemon", true);
       return;  // assume next fork will fail too
     }
     if (clone > 0) {  // parent waits for intermediate child
       int status;
-      waitpid (clone, &status, 0);
+      waitpid(clone, &status, 0);
       return;
     }
 
@@ -547,16 +563,16 @@ child_fork(int argc, char *argv[], int moni)
     int i = 0, j = 0;
     bool addnew = true;
     while (1) {
-      if (addnew && (! argv[i] || strcmp (argv[i], "-e") == 0 || strcmp (argv[i], "-") == 0)) {
+      if (addnew && (! argv[i] || strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "-") == 0)) {
         addnew = false;
         // insert additional parameters here
         newargv[j++] = "-o";
         char parbuf1[28];
-        sprintf (parbuf1, "Rows=%d", term.rows);
+        sprintf(parbuf1, "Rows=%d", term.rows);
         newargv[j++] = parbuf1;
         newargv[j++] = "-o";
         char parbuf2[31];
-        sprintf (parbuf2, "Columns=%d", term.cols);
+        sprintf(parbuf2, "Columns=%d", term.cols);
         newargv[j++] = parbuf2;
       }
       newargv[j] = argv[i];
@@ -577,11 +593,18 @@ child_fork(int argc, char *argv[], int moni)
     }
 
     // provide environment to clone size
-    setenvi("MINTTY_ROWS", term.rows);
-    setenvi("MINTTY_COLS", term.cols);
+    if (clone_size_token) {
+      setenvi("MINTTY_ROWS", term.rows);
+      setenvi("MINTTY_COLS", term.cols);
+    }
+    else
+      clone_size_token = true;
     // provide environment to select monitor
     if (moni > 0)
       setenvi("MINTTY_MONITOR", moni);
+    // propagate shortcut-inherited icon
+    if (icon_is_from_shortcut)
+      setenv("MINTTY_ICON", cs__wcstoutf(cfg.icon), true);
 
 #if CYGWIN_VERSION_DLL_MAJOR >= 1005
     execv("/proc/self/exe", argv);

@@ -138,7 +138,11 @@ config_dialog_proc(HWND wnd, UINT msg, WPARAM wParam, LPARAM lParam)
       winctrl_init(&ctrls_panel);
       windlg_add_tree(&ctrls_base);
       windlg_add_tree(&ctrls_panel);
-      copy_config(&new_cfg, &cfg);
+#ifdef old_config
+      copy_config("dialog", &new_cfg, &cfg);
+#else
+      copy_config("dialog", &new_cfg, &file_cfg);
+#endif
 
       RECT r;
       GetWindowRect(GetParent(wnd), &r);
