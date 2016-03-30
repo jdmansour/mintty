@@ -561,6 +561,10 @@ win_paint(void)
   HBITMAP off_bm = CreateDIBSection(off_dc, &bmi, DIB_RGB_COLORS, &pBits, 0, 0);
   HBITMAP off_oldbm = SelectObject(off_dc, off_bm);
 
+  SetBkMode(off_dc, GetBkMode(dc));
+  SetBkColor(off_dc, GetBkColor(dc));
+  SetTextColor(off_dc, GetTextColor(dc));
+
   term_invalidate(
     (p.rcPaint.left - PADDING) / font_width,
     (p.rcPaint.top - PADDING) / font_height,
@@ -575,9 +579,11 @@ win_paint(void)
       p.rcPaint.top < PADDING ||
       p.rcPaint.right >= PADDING + font_width * term.cols ||
       p.rcPaint.bottom >= PADDING + font_height * term.rows) {
+    // int idx = (int)((float)rand() / RAND_MAX * COLOUR_NUM);
+    // colour bg_colour = colours[idx];
     colour bg_colour = colours[term.rvideo ? FG_COLOUR_I : BG_COLOUR_I];
     HBRUSH oldbrush = SelectObject(dc, CreateSolidBrush(bg_colour));
-    HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, 0, bg_colour));
+    // HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, 0, bg_colour));
 
     IntersectClipRect(dc, p.rcPaint.left, p.rcPaint.top, p.rcPaint.right,
                       p.rcPaint.bottom);
@@ -588,20 +594,28 @@ win_paint(void)
 
     Rectangle(dc, p.rcPaint.left, p.rcPaint.top,
                   p.rcPaint.right, p.rcPaint.bottom);
+    // Rectangle(dc, 0, 0,
+    //               p.rcPaint.right, p.rcPaint.bottom);
 
     DeleteObject(SelectObject(dc, oldbrush));
-    DeleteObject(SelectObject(dc, oldpen));
+    // DeleteObject(SelectObject(dc, oldpen));
+
+    int alpha = OPAQUE_ALPHA;
+    if (bg_colour == colours[BG_COLOUR_I] && cfg.transparency == TR_GLASS) {
+      alpha = MEDIUM_ALPHA;
+    }
 
     /* set alpha channel in border region */
-    for (int y=p.rcPaint.top; y<p.rcPaint.bottom; y++) {
+    for (int y=0; y<p.rcPaint.bottom; y++) {
+    // for (int y=p.rcPaint.top; y<p.rcPaint.bottom; y++) {
       BYTE *pPixel= (BYTE *) pBits + bmi.bmiHeader.biWidth * 4 * y;
-      for (int x=p.rcPaint.left; x<p.rcPaint.right ; x++) {
+      for (int x=0; x<p.rcPaint.right ; x++) {
+      // for (int x=p.rcPaint.left; x<p.rcPaint.right ; x++) {
         /* dont touch text region (honor ExcludeClipRect above) */
-        if (x > PADDING && x < PADDING + font_width * term.cols &&
-            y > PADDING && y < PADDING + font_height * term.rows) {
-          continue;
-        }
-        int alpha = MEDIUM_ALPHA;
+        // if ((x > PADDING) && (x < PADDING + font_width * term.cols) &&
+        //     (y > PADDING) && (y < PADDING + font_height * term.rows)) {
+        //   continue;
+        // }
         pPixel[0] *= alpha/255.;
         pPixel[1] *= alpha/255.;
         pPixel[2] *= alpha/255.;
@@ -614,6 +628,11 @@ win_paint(void)
   BitBlt(win_dc, p.rcPaint.left, p.rcPaint.top,
          p.rcPaint.right-p.rcPaint.left, p.rcPaint.bottom-p.rcPaint.top,
          off_dc, p.rcPaint.left, p.rcPaint.top, SRCCOPY);
+
+  // HBRUSH oldbrush = SelectObject(win_dc, CreateSolidBrush(colours[3]));
+  // Rectangle(win_dc, p.rcPaint.left, p.rcPaint.top,
+  //        p.rcPaint.right, p.rcPaint.bottom);
+  // DeleteObject(SelectObject(win_dc, oldbrush));
 
   DeleteObject(SelectObject(off_dc, off_oldbm));
   DeleteDC(off_dc);
