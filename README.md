@@ -5,7 +5,7 @@ and [Msys2](https://github.com/msys2).
 :warning: Note: this is a fork of mintty, for the original sources see [mintty/mintty](https://github.com/mintty/mintty/).
 
 #### Screenshot: ####
-[[wiki/screenshot.png|alt=Screenshot]]
+![Screenshot](wiki/screenshot.png)
 
 #### Added features in this fork: ####
 
