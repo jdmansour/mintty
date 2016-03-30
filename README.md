@@ -4,6 +4,9 @@ and [Msys2](https://github.com/msys2).
 
 :warning: Note: this is a fork of mintty, for the original sources see [mintty/mintty](https://github.com/mintty/mintty/).
 
+#### Screenshot: ####
+[[wiki/screenshot.png|alt=Screenshot]]
+
 #### Added features in this fork: ####
 
   * Added support for glass / blur-behind in Windows 10.  Now supports glass in Vista, 7, 8 (with [Aero Glass](http://www.glass8.eu/)), and 10.
