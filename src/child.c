@@ -35,6 +35,8 @@ int forkpty(int *, char *, struct termios *, struct winsize *);
 
 bool clone_size_token = true;
 
+string child_dir = null;
+
 static pid_t pid;
 static bool killed;
 static int pty_fd = -1, log_fd = -1, win_fd;
@@ -46,7 +48,7 @@ childerror(char * action, bool from_fork)
   char * err = strerror(errno);
   if (from_fork && errno == ENOENT)
     err = "There are no available terminals";
-  int len = asprintf(&msg, "\033[30;41m\033[KError: %s: %s.\033[0m\r\n", action, err);
+  int len = asprintf(&msg, "\033[30;%dm\033[KError: %s: %s.\033[0m\r\n", from_fork ? 41 : 43, action, err);
   if (len > 0) {
     term_write(msg, len);
     free(msg);
@@ -206,13 +208,21 @@ child_create(char *argv[], struct winsize *winp)
       char * log = path_win_w_to_posix(cfg.log);
       char * format = strchr(log, '%');
       if (format && * ++ format == 'd' && !strchr(format, '%')) {
-        char logf[strlen(log + 20)];
+        char * logf = newn(char, strlen(log) + 20);
         sprintf(logf, log, getpid());
-        log_fd = open(logf, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        free(log);
+        log = logf;
       }
-      else
-        log_fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+      else if (format) {
+        struct timeval now;
+        gettimeofday (& now, 0);
+        char * logf = newn(char, MAX_PATH + 1);
+        strftime (logf, MAX_PATH, log, localtime (& now.tv_sec));
+        free(log);
+        log = logf;
+      }
 
+      log_fd = open(log, O_WRONLY | O_CREAT | O_EXCL, 0600);
       if (log_fd < 0) {
         // report message and filename:
         childerror("could not open log file", false);
@@ -525,6 +535,12 @@ child_conv_path(wstring wpath)
 }
 
 void
+child_set_fork_dir(char * dir)
+{
+  strset(&child_dir, dir);
+}
+
+void
 child_fork(int argc, char *argv[], int moni)
 {
   pid_t clone = fork();
@@ -556,6 +572,9 @@ child_fork(int argc, char *argv[], int moni)
       close(log_fd);
     close(win_fd);
 
+    if (child_dir && *child_dir)
+      chdir(child_dir);
+
 #ifdef add_child_parameters
     // add child parameters
     int newparams = 0;
@@ -567,11 +586,11 @@ child_fork(int argc, char *argv[], int moni)
         addnew = false;
         // insert additional parameters here
         newargv[j++] = "-o";
-        char parbuf1[28];
+        static char parbuf1[28];  // static to prevent #530
         sprintf(parbuf1, "Rows=%d", term.rows);
         newargv[j++] = parbuf1;
         newargv[j++] = "-o";
-        char parbuf2[31];
+        static char parbuf2[31];  // static to prevent #530
         sprintf(parbuf2, "Columns=%d", term.cols);
         newargv[j++] = parbuf2;
       }
@@ -587,7 +606,7 @@ child_fork(int argc, char *argv[], int moni)
 #endif
 
     void setenvi(char * env, int val) {
-      char valbuf[22];
+      static char valbuf[22];  // static to prevent #530
       sprintf(valbuf, "%d", val);
       setenv(env, valbuf, true);
     }

@@ -189,6 +189,16 @@ noremap! <Esc>O[ <C-c>
 ```
 
 
+## Keyboard not working as expected in certain applications (e.g. vim) ##
+
+If for example the PgUp and PgDn keys do not work in your editor, the reason 
+may be that in the mintty Options, the Terminal Type was set to "vt100" 
+and based on the resulting setting of the environment variable TERM, 
+the application expects other key sequences than mintty sends.
+(While mintty could be changed to send VT100 application keypad codes in 
+that case, the current behaviour is compatible with xterm.)
+
+
 ## Using Ctrl+Tab to switch session in GNU Screen ##
 
 The _Ctrl+Tab_ and _Ctrl+Shift+Tab_ key combinations can be used to switch session in **[GNU Screen](http://www.gnu.org/software/screen)**. In order to do do, their use as shortcuts for switching mintty windows needs to be disabled on the _Keys_ page of the options, and their keycodes need to be mapped in _~/.screenrc_:
@@ -259,7 +269,7 @@ Different notations are accepted for colour specifications:
 * ```rrr,ggg,bbb``` (256 decimal values)
 * ```rgb:RR/GG/BB``` (256 hex values)
 * ```rgb:RRRR/GGGG/BBBB``` (65536 hex values)
-* *color-name* (using X11 color names, e.g. ```echo -ne '\e]10;bisque2\a'```)
+* _color-name_ (using X11 color names, e.g. ```echo -ne '\e]10;bisque2\a'```)
 
 
 ## Using colour schemes (“Themes”) ##
@@ -347,6 +357,25 @@ C:\cygwin\bin\mintty.exe -o Locale=C -o Charset=GBK /bin/bash -l -c "cd `echo D:
 
 So the initial shell, interpreting its ```cd``` parameters already in GBK 
 encoding, will see it properly converted.
+
+
+## Spawning a new terminal window in the same directory ##
+
+With Alt+F2, normally another mintty window would be opened in the 
+home directory (or where the current window was started), while it may 
+be desirable to open it in the same directory as the current working 
+directory. This can be achieved with some interaction between the shell 
+and the terminal, as applied e.g. by the Mac Terminal.
+The shell can inform the terminal about a changed directory with the 
+OSC 7 control sequence (see the [[CtrlSeqs]] wiki page), to be output 
+with the prompt (example for bash):
+
+```
+PROMPT_COMMAND='echo -ne "\e]7;$PWD\a" ; '"$PROMPT_COMMAND"
+```
+
+The sequence could also be output by shell aliases or functions changing the directory.
+It cannot be embedded in the prompt itself with ```\w``` as that is using some shortcuts.
 
 
 ## Multi-monitor support ##

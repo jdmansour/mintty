@@ -185,12 +185,16 @@ static int
 row_padding(int i, int e)
 {
   if (i == 0 && e == 0)
-    return 2;
+    return 0;  // 2 sometimes looks nicer but may break box characters
   else {
     int exc = 0;
     if (i > 3)
       exc = i - 3;
-    return e - exc;
+    int adj = e - exc;
+    if (adj <= 0)
+      return adj;
+    else
+      return 0;  // return adj may look nicer but break box characters
   }
 }
 
@@ -202,6 +206,15 @@ row_padding(int i, int e)
 #define trace_font(params)	
 #endif
 
+static void
+show_msg(wstring msg, wstring title)
+{
+  if (fprintf(stderr, "%ls", title) < 0 || fputs("\n", stderr) < 0 ||
+      fprintf(stderr, "%ls", msg) < 0 || fputs("\n", stderr) < 0 ||
+      fflush(stderr) < 0)
+    MessageBoxW(0, msg, title, MB_ICONWARNING);
+}
+
 #ifndef TCI_SRCLOCALE
 //old MinGW
 #define TCI_SRCLOCALE 0x1000
@@ -212,8 +225,6 @@ get_default_charset()
 {
   CHARSETINFO csi;
 
-  //long int lcid = GetSystemDefaultLCID();
-  //int ok = TranslateCharsetInfo((DWORD *)lcid, &csi, TCI_SRCLOCALE);
   long int acp = GetACP();
   int ok = TranslateCharsetInfo((DWORD *)acp, &csi, TCI_SRCCODEPAGE);
   if (ok)
@@ -257,7 +268,7 @@ adjust_font_weights()
     (void)fontType;
     (void)lParam;
 
-    trace_font(("%ls %ld it %d cs %d %s\n", lfp->lfFaceName, lfp->lfWeight, lfp->lfItalic, lfp->lfCharSet, (lfp->lfPitchAndFamily & 3) == FIXED_PITCH ? "fixed" : ""));
+    trace_font(("%ls %ld it %d cs %d %s\n", lfp->lfFaceName, (long int)lfp->lfWeight, lfp->lfItalic, lfp->lfCharSet, (lfp->lfPitchAndFamily & 3) == FIXED_PITCH ? "fixed" : ""));
 
     font_found = true;
     if (lfp->lfCharSet == ANSI_CHARSET)
@@ -279,33 +290,33 @@ adjust_font_weights()
 
   HDC dc = GetDC(0);
   EnumFontFamiliesExW(dc, &lf, enum_fonts, 0, 0);
-  trace_font(("fw (%d)%d(%d)/(%d)%d(%d) -> ", fw_norm_0, fw_norm, fw_norm_1, fw_bold_0, fw_bold, fw_bold_1));
+  trace_font(("font width (%d)%d(%d)/(%d)%d(%d)", fw_norm_0, fw_norm, fw_norm_1, fw_bold_0, fw_bold, fw_bold_1));
   ReleaseDC(0, dc);
 
   // check if no font found
   if (!font_found) {
-    MessageBoxW(0, L"Font not found, using system substitute", cfg.font.name, MB_ICONWARNING);
+    show_msg(L"Font not found, using system substitute", cfg.font.name);
     fw_norm = 400;
     fw_bold = 700;
     trace_font(("//\n"));
     return;
   }
   if (!ansi_found && !cs_found) {
-    MessageBoxW(0, L"Font has limited support for character ranges", cfg.font.name, MB_ICONWARNING);
+    show_msg(L"Font has limited support for character ranges", cfg.font.name);
   }
 
   // find available widths closest to selected widths
   if (abs(fw_norm - fw_norm_0) <= abs(fw_norm - fw_norm_1) && fw_norm_0 > 0)
     fw_norm = fw_norm_0;
-  else
+  else if (fw_norm_1 < 1000)
     fw_norm = fw_norm_1;
   if (abs(fw_bold - fw_bold_0) < abs(fw_bold - fw_bold_1) || fw_bold_1 > 1000)
     fw_bold = fw_bold_0;
-  else
+  else if (fw_bold_1 < 1001)
     fw_bold = fw_bold_1;
-  // distinguish bold from normal
-  if (fw_bold == fw_norm) {
-    trace_font(("fw %d/%d -> ", fw_norm, fw_bold));
+  // ensure bold is bolder than normal
+  if (fw_bold <= fw_norm) {
+    trace_font((" -> %d/%d", fw_norm, fw_bold));
     if (fw_norm_0 < fw_norm && fw_norm_0 > 0)
       fw_norm = fw_norm_0;
     if (fw_bold - fw_norm < 300) {
@@ -315,7 +326,16 @@ adjust_font_weights()
         fw_bold = min(fw_norm + 300, 1000);
     }
   }
-  trace_font(("fw %d/%d\n", fw_norm, fw_bold));
+  // enforce preselected boldness
+  int selweight = cfg.font.weight;
+  if (selweight < 700 && cfg.font.isbold)
+    selweight = 700;
+  if (selweight - fw_norm >= 300) {
+    trace_font((" -> %d(%d)/%d", fw_norm, selweight, fw_bold));
+    fw_norm = selweight;
+    fw_bold = min(fw_norm + 300, 1000);
+  }
+  trace_font((" -> %d/%d\n", fw_norm, fw_bold));
 }
 
 /*
@@ -360,15 +380,19 @@ win_init_fonts(int size)
     fw_norm = cfg.font.weight;
     fw_bold = min(fw_norm + 300, 1000);
     // adjust selected font weights to available font weights
+    trace_font(("-> Weight %d/%d\n", fw_norm, fw_bold));
     adjust_font_weights();
+    trace_font(("->     -> %d/%d\n", fw_norm, fw_bold));
   }
   else if (cfg.font.isbold) {
     fw_norm = FW_BOLD;
     fw_bold = FW_HEAVY;
+    trace_font(("-> IsBold %d/%d\n", fw_norm, fw_bold));
   }
   else {
     fw_norm = FW_DONTCARE;
     fw_bold = FW_BOLD;
+    trace_font(("-> normal %d/%d\n", fw_norm, fw_bold));
   }
 
   HDC dc = GetDC(wnd);
@@ -379,7 +403,7 @@ win_init_fonts(int size)
   fonts[FONT_NORMAL] = create_font(fw_norm, false);
 
   GetObject(fonts[FONT_NORMAL], sizeof (LOGFONT), &lfont);
-  trace_font(("font %s %ld it %d cs %d\n", lfont.lfFaceName, lfont.lfWeight, lfont.lfItalic, lfont.lfCharSet));
+  trace_font(("created font %s %ld it %d cs %d\n", lfont.lfFaceName, (long int)lfont.lfWeight, lfont.lfItalic, lfont.lfCharSet));
 
   SelectObject(dc, fonts[FONT_NORMAL]);
   GetTextMetrics(dc, &tm);
@@ -387,9 +411,14 @@ win_init_fonts(int size)
   row_spacing += cfg.row_spacing;
   if (row_spacing < -tm.tmDescent)
     row_spacing = -tm.tmDescent;
-#ifdef check_charset_1
-  if (tm.tmCharSet != get_default_charset()) {
-    MessageBoxW(0, L"Font does not support system locale", cfg.font.name, MB_ICONWARNING);
+    trace_font(("row spacing int %ld ext %ld -> %+d; add %+d -> %+d; desc %ld -> %+d %ls\n", 
+      (long int)tm.tmInternalLeading, (long int)tm.tmExternalLeading, row_padding(tm.tmInternalLeading, tm.tmExternalLeading),
+      cfg.row_spacing, row_padding(tm.tmInternalLeading, tm.tmExternalLeading) + cfg.row_spacing,
+      (long int)tm.tmDescent, row_spacing, cfg.font.name));
+#ifdef check_charset_only_for_returned_font
+  int default_charset = get_default_charset();
+  if (tm.tmCharSet != default_charset && default_charset != DEFAULT_CHARSET) {
+    show_msg(L"Font does not support system locale", cfg.font.name);
   }
 #endif
 
@@ -503,10 +532,12 @@ win_init_fonts(int size)
   }
 
   if (bold_mode == BOLD_FONT && fontsize[FONT_BOLD] != fontsize[FONT_NORMAL]) {
+    trace_font(("bold_mode %d\n", bold_mode));
     bold_mode = BOLD_SHADOW;
     DeleteObject(fonts[FONT_BOLD]);
     fonts[FONT_BOLD] = 0;
   }
+  trace_font(("bold_mode %d\n", bold_mode));
   fontflag[0] = fontflag[1] = fontflag[2] = 1;
 }
 
@@ -879,6 +910,26 @@ MyExtTextOutW(HDC hdc, int X, int Y, UINT fuOptions, const RECT *lprc, LPCWSTR l
   DeleteDC(off_dc);
 }
 
+#define dont_debug_win_text
+
+#ifdef debug_win_text
+
+void trace_line(char * tag, wchar * text, int len)
+{
+  bool show = false;
+  for (int i = 0; i < len; i++)
+    if (text[i] != ' ') show = true;
+  if (show) {
+    printf("%s", tag);
+    for (int i = 0; i < len; i++) printf(" %04X", text[i]);
+    printf("\n");
+  }
+}
+
+#else
+#define trace_line(tag, text, len)	
+#endif
+
 /*
  * Draw a line of text in the window, at given character
  * coordinates, in given attributes.
@@ -886,10 +937,16 @@ MyExtTextOutW(HDC hdc, int X, int Y, UINT fuOptions, const RECT *lprc, LPCWSTR l
  * We are allowed to fiddle with the contents of `text'.
  */
 void
-win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
+win_text(int x, int y, wchar *text, int len, cattr attr, int lattr, bool has_rtl)
 {
+  trace_line("win_text:", text, len);
   lattr &= LATTR_MODE;
   int char_width = font_width * (1 + (lattr != LATTR_NORM));
+
+ /* Only want the left half of double width lines */
+  // check this before scaling up x to pixels!
+  if (lattr != LATTR_NORM && x * 2 >= term.cols)
+    return;
 
  /* Convert to window coordinates */
   x = x * char_width + PADDING;
@@ -897,10 +954,6 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
 
   if (attr.attr & ATTR_WIDE)
     char_width *= 2;
-
- /* Only want the left half of double width lines */
-  if (lattr != LATTR_NORM && x * 2 >= term.cols)
-    return;
 
   uint nfont;
   switch (lattr) {
@@ -911,6 +964,10 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
   if (attr.attr & ATTR_NARROW)
     nfont |= FONT_NARROW;
 
+#ifdef debug_bold
+  wchar t[len + 1]; wcsncpy(t, text, len); t[len] = 0;
+  printf("bold_mode %d attr_bold %d <%ls>\n", bold_mode, !!(attr.attr & ATTR_BOLD), t);
+#endif
   if (bold_mode == BOLD_FONT && (attr.attr & ATTR_BOLD))
     nfont |= FONT_BOLD;
   if (und_mode == UND_FONT && (attr.attr & ATTR_UNDER))
@@ -944,7 +1001,11 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
   }
   if (attr.attr & ATTR_BOLD && cfg.bold_as_colour) {
     if (fgi < 8) {
-      apply_shadow = false;
+      if (!cfg.bold_as_font)
+        apply_shadow = false;
+#ifdef debug_bold
+      printf("fgi < 8 (%d %d): apply_shadow %d\n", (int)colours[fgi], (int)colours[fgi | 8], apply_shadow);
+#endif
 #ifdef enforce_bold
       if (colours[fgi] == colours[fgi | 8])
         apply_shadow = true;
@@ -1014,9 +1075,12 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
   SetBkColor(dc, bg);
 
  /* Check whether the text has any right-to-left characters */
+#ifdef check_rtl_here
+#warning now passed as a parameter to avoid redundant checking
   bool has_rtl = false;
   for (int i = 0; i < len && !has_rtl; i++)
     has_rtl = is_rtl(text[i]);
+#endif
 
   uint eto_options = ETO_CLIPPED;
   if (has_rtl) {
@@ -1035,8 +1099,10 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
       .nGlyphs = len
     };
 
+    trace_line(" <ChrPlc:", text, len);
     GetCharacterPlacementW(dc, text, len, 0, &gcpr,
                            FLI_MASK | GCP_CLASSIN | GCP_DIACRITIC);
+    trace_line(" >ChrPlc:", text, len);
     len = gcpr.nGlyphs;
     eto_options |= ETO_GLYPH_INDEX;
   }
@@ -1060,12 +1126,17 @@ win_text(int x, int y, wchar *text, int len, cattr attr, int lattr)
 
  /* Finally, draw the text */
   SetBkMode(dc, OPAQUE);
+  trace_line(" TextOut:", text, len);
   MyExtTextOutW(dc, xt, yt, eto_options | ETO_OPAQUE, &box, text, len, dxs);
 
  /* Shadow/Overstrike bold */
   if (apply_shadow && bold_mode == BOLD_SHADOW && (attr.attr & ATTR_BOLD)) {
     SetBkMode(dc, TRANSPARENT);
     MyExtTextOutW(dc, xt + 1, yt, eto_options, &box, text, len, dxs);
+    if (lattr != LATTR_NORM) {
+      MyExtTextOutW(dc, xt + 2, yt, eto_options, &box, text, len, dxs);
+      //ExtTextOutW(dc, xt + 3, yt, eto_options, &box, text, len, dxs);
+    }
   }
 
  /* Manual underline */
